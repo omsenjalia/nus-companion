@@ -1,0 +1,159 @@
+# Builds the Nūs Companion for Apple Silicon Macs on one of GitHub's macOS computers and keeps the
+# dmg as a download on the run's page for 7 days. Started by hand only (Actions, build-mac, Run
+# workflow). It never makes a release: a release is public the moment it exists, so that stays a
+# human step.
+#
+# The dmg is ad-hoc signed, not notarized: there is no Apple Developer ID yet, so macOS asks once
+# (System Settings, Privacy & Security, Open Anyway). No secret is used anywhere in this file.
+name: build-mac
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  mac:
+    runs-on: macos-15
+    timeout-minutes: 45
+    env:
+      # No Developer ID: electron-builder must not look for one; afterPack ad-hoc signs.
+      CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      # Speech to text: whisper.cpp built here for Apple Silicon, from the same release as the
+      # Windows binaries. CPU only, static (no extra libraries in the app), generic arm64 so it runs
+      # on an M1 whatever chip built it. Kept between runs.
+      - uses: actions/cache@v4
+        id: whisper-cache
+        with:
+          path: vendor/whisper-mac
+          key: whisper-mac-b4938-cpu-static-v1
+
+      - name: Build whisper.cpp for Apple Silicon
+        if: steps.whisper-cache.outputs.cache-hit != 'true'
+        run: |
+          git clone --depth 1 --branch b4938 https://github.com/ggml-org/whisper.cpp "$RUNNER_TEMP/whisper.cpp"
+          cmake -S "$RUNNER_TEMP/whisper.cpp" -B "$RUNNER_TEMP/wbuild" -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF -DGGML_METAL=OFF -DGGML_NATIVE=OFF -DWHISPER_SDL2=OFF -DWHISPER_BUILD_TESTS=OFF -DWHISPER_BUILD_EXAMPLES=ON -DCMAKE_OSX_ARCHITECTURES=arm64 -DCMAKE_OSX_DEPLOYMENT_TARGET=12.0
+          cmake --build "$RUNNER_TEMP/wbuild" --config Release -j 5 --target whisper-cli whisper-server
+          mkdir -p vendor/whisper-mac
+          cp "$RUNNER_TEMP/wbuild/bin/whisper-cli" "$RUNNER_TEMP/wbuild/bin/whisper-server" vendor/whisper-mac/
+          cp "$RUNNER_TEMP/whisper.cpp/LICENSE" vendor/whisper-mac/LICENSE
+
+      - name: Check and sign the whisper binaries
+        run: |
+          ls -la vendor/whisper-mac
+          for b in whisper-cli whisper-server; do
+            echo "--- $b links to:"; otool -L "vendor/whisper-mac/$b"
+            if otool -L "vendor/whisper-mac/$b" | tail -n +2 | grep -v -E '^\s+(/usr/lib/|/System/Library/)'; then echo "$b links a library the app does not ship" >&2; exit 1; fi
+            codesign --force --sign - "vendor/whisper-mac/$b"
+            lipo -archs "vendor/whisper-mac/$b"
+          done
+
+      - uses: actions/cache@v4
+        id: model-cache
+        with:
+          path: vendor/whisper-models
+          key: whisper-model-base-en-q5_1-v1
+
+      - name: Fetch the base English model
+        if: steps.model-cache.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p vendor/whisper-models
+          curl -fL --retry 3 -o vendor/whisper-models/ggml-base.en-q5_1.bin https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.en-q5_1.bin
+
+      # Fable, the Knot's own voice: the Kokoro v1.0 archive the app itself knows (its URL and sha256
+      # are in companion/src/voice/index.js), unpacked once and kept between runs.
+      - uses: actions/cache@v4
+        id: voice-cache
+        with:
+          path: vendor/voice/kokoro-multi-lang-v1_0
+          key: kokoro-multi-lang-v1_0-v1
+
+      - name: Fetch Fable (Kokoro v1.0)
+        if: steps.voice-cache.outputs.cache-hit != 'true'
+        run: |
+          curl -fL --retry 3 -o "$RUNNER_TEMP/kokoro.tar.bz2" https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/kokoro-multi-lang-v1_0.tar.bz2
+          echo "60703707bc05ccd48d60e1eb723f38b07d6e474795a0b6a588d7220400e0f7a4  $RUNNER_TEMP/kokoro.tar.bz2" | shasum -a 256 -c -
+          mkdir -p vendor/voice
+          tar -xjf "$RUNNER_TEMP/kokoro.tar.bz2" -C vendor/voice
+
+      - name: Mac tests
+        run: node --test companion/test/mac-beta.test.js companion/test/screen-points.test.js companion/test/whisper-runnable.test.js companion/test/tour.test.js companion/test/listen.test.js companion/test/listen-resident.test.js
+
+      - name: Whole test suite (report only; some tests are Windows-shaped)
+        continue-on-error: true
+        run: npm test
+
+      - name: Build the dmg (arm64)
+        run: npm run dist:companion:mac
+
+      - name: What was built
+        run: |
+          ls -la dist-companion
+          du -sh "dist-companion/mac-arm64/Nus Companion.app"
+          ls "dist-companion/mac-arm64/Nus Companion.app/Contents/Resources"
+          shasum -a 256 dist-companion/*.dmg
+
+      - name: Scan the packed app
+        continue-on-error: true
+        run: node scripts/package-security-check.js --profile=companion "dist-companion/mac-arm64/Nus Companion.app/Contents/Resources/app.asar"
+
+      - name: Signature and Gatekeeper report
+        run: |
+          codesign -dv --verbose=2 "dist-companion/mac-arm64/Nus Companion.app" 2>&1 || true
+          echo "--- spctl (expected to reject: ad-hoc, not notarized) ---"
+          spctl --assess --type execute --verbose=2 "dist-companion/mac-arm64/Nus Companion.app" 2>&1 || true
+
+      # The speech engine, straight from the packed app, on a clip with known words made by macOS's
+      # own voice.
+      - name: Speech engine check (the packed binary)
+        run: |
+          RES="dist-companion/mac-arm64/Nus Companion.app/Contents/Resources"
+          ls -la "$RES/whisper" "$RES/whisper-models"
+          say -o "$RUNNER_TEMP/settings.aiff" "Open the settings page and turn on dark mode for me please."
+          afconvert -f WAVE -d LEI16@16000 -c 1 "$RUNNER_TEMP/settings.aiff" "$RUNNER_TEMP/settings.wav"
+          HEARD="$("$RES/whisper/whisper-cli" -m "$RES/whisper-models/ggml-base.en-q5_1.bin" -f "$RUNNER_TEMP/settings.wav" -nt 2>/dev/null)"
+          echo "heard: $HEARD"
+          echo "### Speech engine heard: $HEARD" >> "$GITHUB_STEP_SUMMARY"
+          echo "$HEARD" | grep -qi "settings"
+
+      # The built app starts the way a double-click starts it. publik points at a closed port and the
+      # usage counts are off, so the run makes no install and counts as nobody.
+      - name: The built app starts
+        run: |
+          APP="$PWD/dist-companion/mac-arm64/Nus Companion.app"
+          LOG="$RUNNER_TEMP/open-check.log"; : > "$LOG"
+          open -n -a "$APP" --stdout "$LOG" --stderr "$LOG" --env NUS_STATS=0 --env DO_NOT_TRACK=1 --env PUBLIK_TELEMETRY=off --env NUS_HELLO=0 --env PUBLIK_ORIGIN=http://127.0.0.1:9 --args --remote-debugging-port=9555 "--data-dir=$RUNNER_TEMP/open-check-profile"
+          up=0
+          for i in $(seq 1 60); do
+            curl -s http://127.0.0.1:9555/json/version >/dev/null && { up=1; break; }
+            sleep 0.5
+          done
+          echo "the app answered on its debugging port: $up"
+          head -8 "$LOG" || true
+          pkill -f "Nus Companion.app/Contents/MacOS" || true
+          echo "### The built app started: $up" >> "$GITHUB_STEP_SUMMARY"
+          [ $up = 1 ]
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: nus-companion-mac-arm64-dmg
+          path: dist-companion/*.dmg
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Runner facts
+        run: |
+          sw_vers
+          sysctl -n machdep.cpu.brand_string hw.ncpu hw.memsize
