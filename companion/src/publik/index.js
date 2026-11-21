@@ -96,7 +96,7 @@ function readError(e) {
 const FREE_WEEK_402 = 'publik gives new subscribers a free week: it needs a card and is paid after the week unless you cancel.';
 function errorLine(e) {
   const r = readError(e);
-  if (r.kind === 'balance') return (r.message ? r.message.replace(/\s*$/, '') + ' ' : '') + FREE_WEEK_402 + ' Or switch to your own key in Settings. Voice commands and reminders still work.';
+  if (r.kind === 'balance') return (r.message ? r.message.replace(/\s*$/, '') + ' ' : '') + FREE_WEEK_402 + ' Or keep going for free with your own key: a free Gemini key works. Voice commands and reminders still work.';
   if (r.kind === 'signed_out') return 'publik signed this computer out. Restart Nūs to sign in again, or switch to your own key in Settings.';
   if (r.kind === 'offline') return 'publik is not reachable. Check your connection. Voice commands and reminders still work.';
   return '';

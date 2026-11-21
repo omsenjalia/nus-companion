@@ -8,10 +8,12 @@
 // - When publik does not answer at start (Windows sign-in often beats Wi-Fi), it answers Retry by
 //   itself every 5 seconds for up to 60 seconds before it shows "publik is not reachable". The
 //   module still decides; this only waits before drawing the same screen.
-//   Only when publik gave no answer. When publik answered with a reason (0.1.34: on 2026-11-21 it
-//   answered every new computer "This app has reached its daily provisioning cap"), the screen is
-//   drawn at once: until then a new person saw nothing for a minute, started Nūs again, and that
-//   second start ended the first one (main-companion.js, second-instance).
+//   Only when publik gave no answer. When publik answered with a reason, its screen is drawn at
+//   once, in publik's own words. (On 2026-11-21 publik answered every new computer "This app has
+//   reached its daily provisioning cap"; a new person saw nothing for a minute, started Nūs again,
+//   and that second start ended the first one: main-companion.js, second-instance. 0.1.34 gave that
+//   answer its own "Full for today" screen; publik removed the cap the same day, so the screen is
+//   gone again.)
 // - Starting Nūs again while this window is up brings it to the front (front()).
 // - Closing the window quits the Companion: there is no way past the gate but signing in.
 // - The moment the module sees the sign-in in the browser (it polls every 3 seconds), the window
@@ -63,23 +65,6 @@ const NO_BALANCE_LINES = [NO_BALANCE_LINE];
 const NOT_REACHABLE = 'publik is not reachable. Check your connection.';
 // Pure: publik gave no answer (offline, a timeout). Only this is retried quietly before it is drawn.
 function noAnswer(screen) { return !!screen && screen.id === 'unreachable' && (!screen.body || String(screen.body) === NOT_REACHABLE); }
-// Pure: publik refused to set up a new computer because the app's daily number is used up
-// (POST /installs, 429 mint_cap_reached, "This app has reached its daily provisioning cap.").
-function capReached(screen) { return !!screen && screen.id === 'unreachable' && /provisioning cap/i.test(String(screen.body || '')); }
-// Pure: when the day's number starts again, in the person's own clock: "6:00 PM today".
-// Read once, 2026-11-21 21:01 UTC: Retry-After 10699 s, which is midnight UTC. One reading, so the
-// window says "around".
-function reopensAt(nowMs) {
-  const now = new Date(nowMs);
-  const at = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + 1));
-  const time = at.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' });
-  const sameDay = at.getFullYear() === now.getFullYear() && at.getMonth() === now.getMonth() && at.getDate() === now.getDate();
-  return time + (sameDay ? ' today' : ' tomorrow');
-}
-const FULL = { headline: 'Full for today',
-  line: 'So many people joined Nūs today that publik, which signs you in, stopped taking new computers for the day.',
-  callout: (when) => 'Nothing is wrong with your install. Sign-in opens again around ' + when + '.',
-  caption: 'Works once sign-in opens again' };
 
 // Pure: the name Nūs's own anonymous stats use for one of the module's screens (stats.js,
 // GATE_SCREENS). sign_in becomes waiting once the browser was opened. Exported for tests.
@@ -166,12 +151,6 @@ function view(screen, opts = {}) {
         if (b.action === 'own_key') { b.primary = false; b.small = true; }
       }
     }
-  } else if (capReached(screen)) {
-    // publik's own sentence stays on the window, small; ours say what it means for the person.
-    out.state = 'full';
-    put({ headline: FULL.headline, line: FULL.line, callout: FULL.callout(reopensAt(typeof opts.nowMs === 'number' ? opts.nowMs : Date.now())) });
-    out.footnote = 'publik says: ' + String(screen.body);
-    for (const b of out.buttons) if (b.action === 'retry') b.caption = FULL.caption;
   } else { out.state = 'unreachable'; out.line = screen.body; out.footnote = ''; }
   out.nus = [out.headline, out.line, out.callout, ...out.steps, out.small, out.updating].filter(Boolean);
   return out;
@@ -271,4 +250,4 @@ function createGateUI(opts = {}) {
   };
 }
 
-module.exports = { createGateUI, view, statScreen, readPlan, asksFor, comesForward, noAnswer, capReached, reopensAt, NOT_REACHABLE, FULL, WORDING, WORDING_PICK, PLAN_LINE, STEPS, INTRO, UPDATING, WAITING, CHOICE_LINE, NO_BALANCE_LINE, FREE_WEEK_LINE, FREE_WEEK_CAPTION, WAITING_LINES, NO_BALANCE_LINES };
+module.exports = { createGateUI, view, statScreen, readPlan, asksFor, comesForward, noAnswer, NOT_REACHABLE, WORDING, WORDING_PICK, PLAN_LINE, STEPS, INTRO, UPDATING, WAITING, CHOICE_LINE, NO_BALANCE_LINE, FREE_WEEK_LINE, FREE_WEEK_CAPTION, WAITING_LINES, NO_BALANCE_LINES };

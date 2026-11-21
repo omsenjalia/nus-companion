@@ -44,7 +44,7 @@ test('the switch button is wired: answer bubble, guide, the no-AI bubbles, and i
   assert.match(index, /function publikSwitchAction\(provider, e\)/);
   assert.match(index, /\.\.\.publikTopUpAction\(e\), \.\.\.publikSwitchAction\(llm && llm\.provider, e\)/, 'the answer bubble');
   assert.equal((index.match(/\.\.\.publikSwitchAction\('', NO_KEY_COPY\)/g) || []).length, 2, 'both no-AI bubbles');
-  assert.match(index, /failActions: \(provider, err\) => publikSwitchAction\(provider, err\)/, 'the guide');
+  assert.match(index, /failActions: \(provider, err\) => \[\.\.\.publikTopUpAction\(err\), \.\.\.publikSwitchAction\(provider, err\)\]/, 'the guide (0.1.35: with the paywall buttons too)');
   assert.match(index, /p\.action === 'publik-switch'\) \{ publikSwitch\(\); return; \}/);
   assert.match(index, /label: 'Switch to publik'/);
   const session = read('companion/src/guide/session.js');
@@ -84,7 +84,7 @@ test('an empty publik balance: publik\'s message, the free week with its card an
   const line = plainAskError('publik', e);
   assert.match(line, /^Not enough publik API balance\. /);
   assert.match(line, /free week/); assert.match(line, /needs a card/); assert.match(line, /paid after the week unless you cancel/);
-  assert.match(line, /own key in Settings/); assert.match(line, /Voice commands and reminders still work\.$/);
+  assert.match(line, /your own key: a free Gemini key works/); assert.match(line, /Voice commands and reminders still work\.$/);
   assert.doesNotMatch(line.replace('Not enough publik API balance. ', ''), MONEY);
   assert.doesNotMatch(line, /—/);
   assert.equal(pub.readError(e).url, 'https://publikhq.com/wallet/add');
@@ -149,5 +149,5 @@ test('the build config and publik\'s module carry the same release version', () 
   const mod = /const APP_VERSION = "(\d+\.\d+\.\d+)";/.exec(read('companion/src/publik/publik.js'));
   assert.ok(build && mod, 'both name a version');
   assert.equal(mod[1], build[1]);
-  assert.equal(build[1], '0.1.34');
+  assert.equal(build[1], '0.1.35');
 });

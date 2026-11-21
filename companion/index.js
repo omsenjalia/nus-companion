@@ -1078,14 +1078,34 @@ function maybeAskFeedback(reason) {
     }
   }, 900);
 }
-// publik API's empty balance (402): the bubble's one extra button opens Publik's one top-up link.
+// publik API's empty balance (402). Two buttons: the person's own key first, then Publik's one
+// top-up link. 0.1.35: a free Gemini key keeps Nūs free, and until now the only button was Top up,
+// and a screen ask had no button at all.
 let publikTopUp = null;
 function publikTopUpAction(e) {
   let r = null;
   try { r = require('./src/publik').readError(e); } catch (_) { r = null; }
-  if (!r || r.kind !== 'balance' || !r.url || !/^https:\/\//.test(r.url)) return [];
+  if (!r || r.kind !== 'balance') return [];
+  // The host remembers the wall was met: a key pasted after it answers from then on.
+  try { if (hooks.publikPaywall) hooks.publikPaywall(); } catch (_) { /* a note, never a failure */ }
+  const own = { id: 'publik-own-key', label: 'Use my own key' };
+  if (!r.url || !/^https:\/\//.test(r.url)) return [own];
   publikTopUp = r.url;
-  return [{ id: 'publik-topup', label: 'Top up' }];
+  return [own, { id: 'publik-topup', label: 'Top up' }];
+}
+// "Use my own key" on the paywall. With a key already saved the answers move to it at once (the
+// switch in Settings, Keys is what was missing: a person pasted a key and publik still answered).
+// With none, Settings opens at Keys, and the key pasted there takes over by itself.
+const OWN_KEY_NOW = 'Your own key answers now. Ask again.';
+const OWN_KEY_PASTE = 'Paste a key in Settings, Keys. A free Gemini key works. Nūs switches to it by itself.';
+function publikOwnKey() {
+  let r = 'no';
+  try { if (hooks.publikOwnKey) r = String(hooks.publikOwnKey() || 'no'); } catch (e) { console.log('[publik] own key failed: ' + e.message); }
+  routeLog('publik: own key from the paywall, ' + r);
+  if (r === 'switched') { flash(OWN_KEY_NOW, 4500); return r; }
+  if (typeof hooks.showSettings === 'function') hooks.showSettings('keys'); else if (hooks.showDesktop) hooks.showDesktop();
+  flash(OWN_KEY_PASTE, 7000);
+  return r;
 }
 // The person's own key or Claude Code is what failed (quota, credit, refused, nothing set up) and
 // this computer is signed in with publik: one button moves the answers to publik (0.1.22).
@@ -1857,6 +1877,7 @@ function registerIpc() {
     if (p && p.action === 'walk' && selection) { walkFromSelection(); return; }
     if (p && p.action === 'publik-topup') { if (publikTopUp) shell.openExternal(publikTopUp).catch(() => {}); return; }
     if (p && p.action === 'publik-switch') { publikSwitch(); return; }
+    if (p && p.action === 'publik-own-key') { publikOwnKey(); return; }
     if (p && p.action && /^fb-/.test(String(p.action))) { feedbackAction(String(p.action)); return; }
     if (p && p.action && /^nt-/.test(String(p.action))) { channelAction(String(p.action)); return; }
     if (p && p.action && /^rt-/.test(String(p.action))) { retentionAction(String(p.action)); return; }
@@ -3419,7 +3440,8 @@ function getGuide() {
     hashCapture,
     selfPid: process.pid,
     log: (m) => console.log('[guide]', m),
-    failActions: (provider, err) => publikSwitchAction(provider, err),
+    // 0.1.35: a publik paywall on a screen ask had only a sentence, no button.
+    failActions: (provider, err) => [...publikTopUpAction(err), ...publikSwitchAction(provider, err)],
     // Keep = explicit consent: the session summary goes to the outbox the
     // desktop already ingests, whatever the reportToNus default says.
     onKeep: (record) => {
@@ -5525,6 +5547,8 @@ function initCompanion(providedHooks = {}) {
     unregisterShortcuts: () => globalShortcut.unregisterAll(),
     channelTick,
     channelProgress,
+    // The key pasted after the paywall took over (main-companion.js settingsPatch).
+    ownKeyTookOver: () => flash(OWN_KEY_NOW, 4500),
     myNus,
     // The contact card on the dashboard (companion/src/contact.js).
     contactStatus,

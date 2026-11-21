@@ -281,6 +281,22 @@ function adoptLegacyAnthropicKey() {
 // (src/autostart.js). Only a packaged build registers one; a dev run would register electron.exe.
 const autostart = createAutostart({ app, log: m => console.log(m) });
 function applyAutostart(on) { autostart.apply(on); }
+// 0.1.35, the paywall's "Use my own key" (companion/index.js publikOwnKey). publik answers while
+// the stored choice is "publik", whatever keys are saved, so a person who pasted a key after the
+// 402 kept getting the 402. Once the wall was met in this run, a saved key for the chosen provider
+// moves the answers to it: at the button when the key is already there, or when it is pasted.
+// The same switch as "Use my own key or Claude Code" in Settings, Keys; it can be turned back there.
+let paywallMet = false;
+function ownKeyReady() { try { const s = store.getSettings(); return !!String((s.apiKeys || {})[s.provider] || '').trim(); } catch (_) { return false; } }
+function answerWithOwnKey() {
+  if (!publik || publik.choice() !== 'publik' || !ownKeyReady()) return false;
+  publik.setChoice('own_key');
+  if (publik.choice() !== 'own_key') return false;
+  paywallMet = false;
+  try { stats.aiSource(publik.choice()); } catch (_) { /* counting never holds this up */ }
+  send('home:settings', publicSettings());
+  return true;
+}
 function settingsPatch(patch) {
   if (!patch || typeof patch !== 'object' || Array.isArray(patch)) throw new Error('Invalid settings.');
   const clean = {};
@@ -313,6 +329,8 @@ function settingsPatch(patch) {
   if (clean.apiKeys && Object.prototype.hasOwnProperty.call(clean.apiKeys, 'anthropic')) mirrorAnthropicKey(clean.apiKeys.anthropic);
   // A pasted key counts as key_connected (the provider name only, never the key).
   for (const [provider, value] of Object.entries(clean.apiKeys || {})) if (value) stats.keyConnected(provider);
+  // A key pasted after publik's paywall takes over the answers (see answerWithOwnKey).
+  if (paywallMet && Object.values(clean.apiKeys || {}).some(Boolean) && answerWithOwnKey()) { try { companion.ownKeyTookOver(); } catch (_) { /* the Knot's word only */ } }
   // The stats switch is the one setting the stats module writes itself: off
   // sends a last stats_off first, so it is not part of the plain patch above.
   if (typeof patch.sendStats === 'boolean') stats.setEnabled(patch.sendStats);
@@ -625,6 +643,13 @@ app.whenReady().then(async () => {
       publik.setChoice('publik'); stats.aiSource(publik.choice());
       send('home:settings', publicSettings());
       return publik.choice() === 'publik';
+    },
+    // 0.1.35: publik's paywall was met, and its "Use my own key" button.
+    publikPaywall: () => { if (publik && publik.active()) paywallMet = true; },
+    publikOwnKey: () => {
+      if (!publik || !publik.active()) return 'no';
+      paywallMet = true;
+      return answerWithOwnKey() ? 'switched' : 'needs_key';
     },
     onHookShown: h => stats.hookShown(h),
     onHookUsed: h => stats.hookUsed(h),

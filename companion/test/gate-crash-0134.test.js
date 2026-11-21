@@ -5,8 +5,9 @@
 //   2. the person started Nūs again, and that second start opened the dashboard before the
 //      database existed, which ended Nūs: db.js "Cannot read properties of undefined (reading
 //      'prepare')";
-//   3. when the window did come up it said only publik's sentence.
-// Nothing here lets anyone past the gate.
+// 0.1.34 fixed 1 and 2, and gave the cap its own "Full for today" screen. publik removed the cap the
+// same evening, so that screen was taken out again: any answer from publik is drawn at once, in
+// publik's own words. Nothing here lets anyone past the gate.
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('fs');
@@ -24,40 +25,19 @@ test('no answer and an answer are told apart', () => {
   assert.equal(G.noAnswer(capScreen()), false, 'publik answered: that is not "no answer"');
   assert.equal(G.noAnswer(mod.gateScreen('unreachable', null, null, 'publik could not set up this computer (500).')), false);
   assert.equal(G.noAnswer(mod.gateScreen('sign_in', null)), false);
-  assert.equal(G.capReached(capScreen()), true);
-  assert.equal(G.capReached(offScreen()), false);
-  assert.equal(G.capReached(mod.gateScreen('sign_in', null)), false);
 });
 
-test('the cap screen: our words say what happened and when it opens, publik\'s sentence and button stay', () => {
-  const nowMs = Date.UTC(2026, 10, 21, 21, 1);
-  const v = G.view(capScreen(), { nowMs });
-  assert.equal(v.state, 'full');
-  assert.equal(v.headline, 'Full for today');
-  assert.match(v.line, /publik, which signs you in/);
-  assert.match(v.callout, /Nothing is wrong with your install/);
-  assert.ok(v.callout.includes(G.reopensAt(nowMs)), 'says when sign-in opens again');
-  assert.equal(v.footnote, 'publik says: ' + CAP);
-  assert.deepEqual(v.buttons.map((b) => b.label), ['Retry'], 'publik\'s label, untouched');
-  assert.equal(v.buttons[0].caption, G.FULL.caption);
-  for (const t of v.nus) { assert.ok(!/[—–]/.test(t), 'no dash: ' + t); assert.ok(!/\b(buy|purchase|pay|subscribe|upgrade|pricing)\b/i.test(t), 'nothing to sell: ' + t); }
-  // Any other answer from publik is still drawn in publik's own words.
-  const other = G.view(mod.gateScreen('unreachable', null, null, 'publik could not set up this computer (500).'));
-  assert.equal(other.state, 'unreachable'); assert.equal(other.line, 'publik could not set up this computer (500).');
+test('an answer from publik is drawn in its own words, with its Retry button', () => {
+  for (const words of [CAP, 'publik could not set up this computer (500).']) {
+    const v = G.view(mod.gateScreen('unreachable', null, null, words));
+    assert.equal(v.state, 'unreachable'); assert.equal(v.line, words);
+    assert.equal(v.headline, '', 'no words of ours on top');
+    assert.deepEqual(v.buttons.map((x) => x.label), ['Retry']);
+    assert.equal(v.buttons[0].caption, '');
+  }
   const off = G.view(offScreen());
   assert.equal(off.state, 'unreachable'); assert.equal(off.line, G.NOT_REACHABLE);
-});
-
-test('the day starts again at midnight UTC, said in the person\'s own clock', () => {
-  const keep = process.env.TZ;
-  try {
-    process.env.TZ = 'America/Chicago';
-    assert.match(G.reopensAt(Date.UTC(2026, 10, 21, 21, 1)), /^(6:00\s?PM|18:00) today$/, '3:01 pm in Chicago');
-    process.env.TZ = 'Australia/Sydney';
-    assert.match(G.reopensAt(Date.UTC(2026, 10, 21, 8, 0)), /^(11:00\s?AM|11:00) tomorrow$/i, '7 pm in Sydney: the next morning');
-    process.env.TZ = 'Asia/Kolkata';
-    assert.match(G.reopensAt(Date.UTC(2026, 10, 21, 21, 1)), /^(5:30\s?AM|0?5:30) today$/i, '2:31 am in India: later the same morning');
-  } finally { if (keep === undefined) delete process.env.TZ; else process.env.TZ = keep; }
+  for (const gone of ['capReached', 'reopensAt', 'FULL']) assert.equal(G[gone], undefined, gone + ' went with the cap');
 });
 
 // The window itself, with Electron stood in for. Only what the gate uses.
@@ -91,7 +71,8 @@ test('publik answered with the cap at start: the window is up at once, not after
   await new Promise((r) => setImmediate(r));
   assert.equal(made.length, 1, 'the window was made on the first answer');
   assert.ok(made[0].calls.includes('show'));
-  assert.equal(made[0].last.state, 'full');
+  assert.equal(made[0].last.state, 'unreachable');
+  assert.equal(made[0].last.line, CAP, 'the sentence publik sent');
   assert.deepEqual(seen, ['unreachable'], 'counted as before');
   assert.equal(await Promise.race([answer, new Promise((r) => setTimeout(() => r('still up'), 20))]), 'still up', 'it waits for the person, it does not retry by itself');
   ui.close();
