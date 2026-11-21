@@ -77,7 +77,10 @@ test('a login launch is told from the arguments', () => {
 
 test('main-companion: the second copy from sign-in is ignored before the dashboard or engaged', () => {
   const main = fs.readFileSync(path.join(__dirname, 'main-companion.js'), 'utf8');
-  const handler = main.slice(main.indexOf("app.on('second-instance'"), main.indexOf("app.on('second-instance'") + 400);
+  // The whole handler, to its closing line (0.1.34 added the database check and its comment).
+  const from = main.indexOf("app.on('second-instance'");
+  const handler = main.slice(from, main.indexOf('});', from) + 3);
+  assert.ok(handler.indexOf('openHome()') > 0 && handler.indexOf('stats.engaged()') > 0, 'the handler was read to its end');
   assert.match(handler, /\(_event, argv\) =>/);
   assert.ok(handler.indexOf('if (isLoginLaunch(argv)) return;') > 0, 'the guard is there');
   assert.ok(handler.indexOf('isLoginLaunch(argv)') < handler.indexOf('openHome()'), 'and it comes first');

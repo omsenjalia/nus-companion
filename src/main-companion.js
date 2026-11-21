@@ -26,12 +26,17 @@ if (!app.requestSingleInstanceLock()) { app.quit(); return; }
 // The lag recorder (companion/src/lag): off in a normal install; on in a dev run, with NUS_LAG=1, or
 // with a lag-on.txt in the profile. It wraps IPC and timers, so it goes in before anything registers.
 require('../companion/src/lag').install({ version: app.isPackaged ? app.getVersion() : 'dev' });
-let home = null, companion = null, folders = null, databaseReady = false;
+let home = null, companion = null, folders = null, databaseReady = false, gateUi = null;
 const { createAutostart, isLoginLaunch } = require('./autostart');
 // A second copy the person started (the shortcut, with Nus already in the tray) opens the dashboard
 // and is a real action. One that Windows started at sign-in is neither: it is ignored (src/autostart.js).
 app.on('second-instance', (_event, argv) => {
   if (isLoginLaunch(argv)) return;
+  // Before the database is open there is no dashboard to show: the only window is publik's sign-in,
+  // so that comes forward. Through 0.1.33 this opened the dashboard, which read the database before
+  // it existed and ended Nūs with "Cannot read properties of undefined (reading 'prepare')" (db.js
+  // all()). Seen 2026-11-21, when publik refused new computers and people started Nūs again.
+  if (!databaseReady) { try { if (gateUi) gateUi.front(); } catch (_) { /* nothing to bring forward */ } return; }
   if (app.isReady()) { openHome(); try { stats.engaged(); } catch (_) { /* stats may not exist yet */ } }
 });
 const crashHandlers = require('./crash').installCrashHandlers(app, dialog);
@@ -575,14 +580,14 @@ app.whenReady().then(async () => {
   if (publik) {
     // The gate window tells the stats which screen is up and which button was pressed (counts
     // only, nothing from publik). Closing it quits; will-quit then sends signin_closed.
-    const ui = require('../companion/src/publik/gate-window').createGateUI({ updating: fs.existsSync(path.join(userData, 'companion-settings.json')), icon: path.join(__dirname, '..', 'companion', 'tray-icon.png'),
+    const ui = gateUi = require('../companion/src/publik/gate-window').createGateUI({ updating: fs.existsSync(path.join(userData, 'companion-settings.json')), icon: path.join(__dirname, '..', 'companion', 'tray-icon.png'),
       onScreen: gateCount.screen, onPress: gateCount.press });
     // 0.1.31: a person who signed in on this computer before gets in when publik does not answer
     // (companion/src/publik/offline-pass.js). Anyone else meets publik's gate exactly as before.
     const gate = await require('../companion/src/publik/offline-pass').passGate({ ensureSignedIn: (gateUi) => publik.module.ensureSignedIn(gateUi), ui, signedInBefore: publik.signedInBefore,
       onBack: () => console.log('[publik] reachable again: signed in in the background') });
     if (gate.offline) { console.log('[publik] no answer (' + gate.offline + '): opened for a person who signed in here before'); gateCount.screen('unreachable'); }
-    ui.close();
+    ui.close(); gateUi = null;
     const signed = gate.signed || { choice: publik.choice() };
     gateCount.passed(signed && signed.choice);
   }
