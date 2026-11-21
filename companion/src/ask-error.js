@@ -57,6 +57,11 @@ function plainAskError(provider, raw) {
     return Who + ' hit its usage limit. Wait a minute and ask again.';
   }
   if (/\b50[234]\b|\b529\b|UNAVAILABLE|overloaded|high demand|temporarily/i.test(text)) return Who + ' is busy right now. Ask again in a few seconds.';
+  // Claude Code gave no word in time, and the pool says why (src/claude-pool.js quietEnd, 0.1.32).
+  // Overloaded, rate limits, signed out and no plan are caught by the lines above.
+  if (/kept retrying: no response from Claude/i.test(text)) return 'Claude Code could not reach Claude. Check your internet and ask again.';
+  if (/Claude Code did not start within/i.test(text)) return 'Claude Code did not start in time on this computer. Ask again. If it keeps happening, a free Gemini key in ' + keys + ' answers without it.';
+  if (/kept retrying: /i.test(text)) return 'Claude Code could not get an answer from Claude just now. Ask again in a minute.';
   if (/timed? ?out|cli_timeout|deadline/i.test(text)) return Who + ' took too long to answer. Ask again.';
   if (/API key not valid|API_KEY_INVALID|invalid.{0,12}(api.?)?key|authentication|unauthori[sz]ed|\b401\b/i.test(text)) return Who + ' did not accept your key. Check it in ' + keys + '; the Test button there says what is wrong.';
   if (/PERMISSION_DENIED|SERVICE_DISABLED|forbidden|\b403\b/i.test(text)) return Who + ' refused this key. Check it in ' + keys + '.';

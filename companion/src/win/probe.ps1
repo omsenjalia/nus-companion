@@ -43,8 +43,32 @@ public static class NusWin {
   [DllImport("user32.dll")] public static extern IntPtr GetAncestor(IntPtr h, uint flags);
   [DllImport("user32.dll")] public static extern IntPtr GetWindow(IntPtr h, uint cmd);
   [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr h);
+  [DllImport("user32.dll")] public static extern IntPtr GetTopWindow(IntPtr h);
+  [DllImport("user32.dll")] public static extern bool IsIconic(IntPtr h);
+  [DllImport("user32.dll", CharSet=CharSet.Unicode)] public static extern int GetClassNameW(IntPtr h, StringBuilder s, int n);
+  [DllImport("dwmapi.dll")] public static extern int DwmGetWindowAttribute(IntPtr h, int attr, out int v, int size);
   [StructLayout(LayoutKind.Sequential)] public struct POINT { public int X; public int Y; }
   [StructLayout(LayoutKind.Sequential)] public struct RECT { public int L; public int T; public int R; public int B; }
+  public static string ClassOf(IntPtr h) { var sb = new StringBuilder(256); GetClassNameW(h, sb, 256); return sb.ToString(); }
+  // The ordinary windows drawn over `target`: above it in the z-order, shown,
+  // not minimised, not cloaked (another desktop, a suspended app), not topmost
+  // themselves, and overlapping it. Returns { how many, the first one's
+  // handle }, or { -1, 0 } when the target is not a top-level window.
+  public static long[] Covering(IntPtr target) {
+    RECT t; if (!GetWindowRect(target, out t)) return new long[] { -1, 0 };
+    long n = 0, first = 0; int guard = 0;
+    for (IntPtr h = GetTopWindow(IntPtr.Zero); h != IntPtr.Zero && guard++ < 5000; h = GetWindow(h, 2)) {
+      if (h == target) return new long[] { n, first };
+      if (!IsWindowVisible(h) || IsIconic(h)) continue;
+      if ((GetWindowLongPtrW(h, -20) & 8) != 0) continue;
+      int cloaked = 0; DwmGetWindowAttribute(h, 14, out cloaked, 4);
+      if (cloaked != 0) continue;
+      RECT r; if (!GetWindowRect(h, out r)) continue;
+      if (Math.Min(r.R, t.R) <= Math.Max(r.L, t.L) || Math.Min(r.B, t.B) <= Math.Max(r.T, t.T)) continue;
+      if (n++ == 0) first = h.ToInt64();
+    }
+    return new long[] { -1, 0 };
+  }
   public static string Title(IntPtr h) { var sb = new StringBuilder(1024); GetWindowTextW(h, sb, 1024); return sb.ToString(); }
   public static uint Pid(IntPtr h) { uint p; GetWindowThreadProcessId(h, out p); return p; }
   public static int[] Cursor() { POINT p; GetCursorPos(out p); return new int[] { p.X, p.Y }; }
@@ -396,6 +420,28 @@ function Handle($req) {
       $ok = [NusWin]::SetWindowPos($h, [IntPtr](-1), 0, 0, 0, 0, [uint32](0x0001 -bor 0x0002 -bor 0x0010))
       $ex = [NusWin]::GetWindowLongPtrW($h, -20)
       return @{ ok=[bool]$ok; topmost=(($ex -band 8) -ne 0) }
+    }
+    'win.covered' {
+      # Is this window really on top? Windows can leave the topmost flag on a
+      # window and still draw ordinary windows over it (found 2026-11-20: the
+      # Knot sat under eleven windows with the flag set, so the flag check saw
+      # nothing wrong). This counts what is drawn over it, and with raise it
+      # lifts the window back, unless the one on top is `unless`: a window a
+      # lift did not get above last time.
+      $h = [IntPtr][int64]$req.hwnd
+      $c = [NusWin]::Covering($h)
+      $ex = [NusWin]::GetWindowLongPtrW($h, -20)
+      $out = @{ ok=$true; above=$c[0]; first=$c[1]; topmost=(($ex -band 8) -ne 0); raised=$false }
+      if ($c[0] -gt 0) {
+        $out.firstClass = [NusWin]::ClassOf([IntPtr]$c[1])
+        $unless = if ($req.unless) { [int64]$req.unless } else { 0 }
+        if ($req.raise -and $c[1] -ne $unless) {
+          $out.raised = [bool][NusWin]::SetWindowPos($h, [IntPtr](-1), 0, 0, 0, 0, [uint32](0x0001 -bor 0x0002 -bor 0x0010))
+          $left = [NusWin]::Covering($h)
+          $out.left = $left[0]; $out.leftFirst = $left[1]
+        }
+      }
+      return $out
     }
     'uia.list' {
       $max = if ($req.max) { [int]$req.max } else { 150 }

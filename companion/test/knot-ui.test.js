@@ -78,7 +78,7 @@ test('a double-click on the Knot is one activation and never dismisses the compo
 test('the overlay re-asserts always-on-top after a fullscreen app strips it', () => {
   const main = fs.readFileSync(path.join(root, 'index.js'), 'utf8');
   assert.match(main, /function reassertTopmost\(\)/);
-  assert.match(main, /if \(!win\.isAlwaysOnTop\(\)\) restoreTopmost\('guard'\); \} catch/, 'only re-assert when the OS bit is gone: an unconditional call strips it');
+  assert.match(main, /if \(!win\.isAlwaysOnTop\(\)\) \{ restoreTopmost\('guard'\); return; \} \} catch/, 'only re-assert when the OS bit is gone: an unconditional call strips it (bit on but buried: on-top.test.js)');
   assert.match(main, /win\.on\('focus', reassertTopmost\)/, 'a Knot click is the moment the bit can be restored');
   assert.match(main, /TOPMOST_GUARD_TICKS = 16/);
   assert.match(main, /if \(\+\+topmostTick >= TOPMOST_GUARD_TICKS\) \{ topmostTick = 0; reassertTopmost\(\); \}/, 'the guard rides the existing cursor probe timer');

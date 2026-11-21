@@ -32,7 +32,10 @@ const LOCKED_ARGS = ['--tools', '', '--strict-mcp-config', '--safe-mode', '--no-
 
 function classifyError(detail) {
   const d = String(detail || '');
-  if (/not logged in|\/login|please run .?login/i.test(d)) return 'cli_not_logged_in';
+  // "Failed to authenticate: OAuth session expired and could not be refreshed" is what Claude Code
+  // 2.1.247 really says when its sign-in has lapsed (seen 2026-11-21). It was read as cli_failed, so
+  // the signed-out rest in ai.js never began and a spare process was started at every talk key.
+  if (/not logged in|\/login|please run .?login|failed to authenticate|session expired/i.test(d)) return 'cli_not_logged_in';
   if (/spend limit|usage limit|rate limit|quota/i.test(d)) return 'cli_spend_limit';
   return 'cli_failed';
 }
@@ -46,14 +49,26 @@ function killTree(child) {
 
 // One stream-json run: feed lines, collect deltas, remember the result.
 function createParser(onDelta) {
-  const p = { produced: false, retried: false, final: '', error: null, detail: '', ended: false, usage: null, costUsd: null, model: '' };
+  const p = { produced: false, retried: false, final: '', error: null, detail: '', ended: false, usage: null, costUsd: null, model: '', started: false, beats: 0, retry: null };
   p.feed = (line) => {
     const s = String(line).trim();
     if (!s.startsWith('{')) return;
     let ev;
     try { ev = JSON.parse(s); } catch (_) { return; }
     const kind = ev.type;
+    // What happened before the first word, for a wait that ends with no answer (quietEnd below).
+    // started: the CLI itself is up. beats: the model is sending (its reply opening, thinking
+    // arriving). retry: the CLI's own retry notice, its last one (system/api_retry).
+    if (kind === 'system') {
+      if (ev.subtype === 'init') p.started = true;
+      if (ev.subtype === 'api_retry') {
+        p.retry = { attempt: Number(ev.attempt) || 0, max: Number(ev.max_retries) || 0, error: String(ev.error || 'unknown').replace(/[^a-z_]/gi, '').slice(0, 40) || 'unknown',
+          status: ev.error_status == null ? null : Number(ev.error_status) || null };
+      }
+      return;
+    }
     if (kind === 'stream_event') {
+      p.started = true; p.beats += 1;
       const inner = ev.event || {}, delta = inner.delta || {};
       if (inner.type === 'message_start' && p.produced) { p.retried = true; return; }   // the CLI retried mid-reply: keep the first attempt
       if (inner.type === 'content_block_delta' && delta.type === 'text_delta' && delta.text && !p.retried) {
@@ -82,6 +97,29 @@ function createParser(onDelta) {
     }
   };
   return p;
+}
+
+// Retry causes that asking again will not fix: the CLI would keep trying for nothing.
+const RETRY_SIGNED_OUT = /^(authentication_failed|oauth_org_not_allowed)$/;
+const RETRY_NO_PLAN = /^(billing_error|account_on_hold)$/;
+
+// A wait that ended with no word: what to tell the caller, from what the parser saw. Until 0.1.32
+// every one of these was the same "no answer started within 45 s" (two error notes on 2026-11-21
+// with no way to tell why). The detail is made of fixed words and numbers only: nothing from the
+// person's screen, question or computer.
+function quietEnd(p, waitedMs) {
+  const s = Math.round(waitedMs / 1000);
+  const r = p.retry;
+  if (r) {
+    const tries = ' (try ' + r.attempt + (r.max ? ' of ' + r.max : '') + (r.status ? ', status ' + r.status : '') + ')';
+    if (RETRY_SIGNED_OUT.test(r.error)) return { error: 'cli_not_logged_in', detail: 'Claude Code could not sign in: ' + r.error + tries };
+    if (RETRY_NO_PLAN.test(r.error)) return { error: 'cli_spend_limit', detail: 'Claude Code was refused: ' + r.error + tries };
+    const why = r.status == null && (r.error === 'unknown' || r.error === 'server_error') ? 'no response from Claude' : r.error;
+    return { error: 'cli_timeout', detail: 'no answer started within ' + s + ' s; Claude Code kept retrying: ' + why + tries };
+  }
+  if (!p.started) return { error: 'cli_timeout', detail: 'Claude Code did not start within ' + s + ' s' };
+  if (p.beats > 0) return { error: 'cli_timeout', detail: 'the reply started and then stopped for ' + s + ' s' };
+  return { error: 'cli_timeout', detail: 'no answer started within ' + s + ' s' };
 }
 
 // content: [{type:'text',text}|{type:'image',source:{type:'base64',media_type,data}}]
@@ -206,11 +244,19 @@ function createClaudePool({ cliPath, cwd, env, log = () => {}, spawn = nodeSpawn
         if (prewarm && !closed) warm({ model, effort, system });   // the next step's process, started now
       };
       if (signal) { try { signal.addEventListener('abort', onAbort, { once: true }); } catch (_) { /* not an EventTarget */ } }
-      firstTimer = setTimeout(() => { if (!parser.produced) { killTree(child); finish({ error: 'cli_timeout', detail: 'no answer started within ' + Math.round(firstOutputMs / 1000) + ' s' }); } }, firstOutputMs);
-      totalTimer = setTimeout(() => { killTree(child); finish({ error: 'cli_timeout' }); }, timeoutMs);
+      let beatsSeen = 0;
+      const noWord = () => { if (!parser.produced && !settled) { killTree(child); finish(quietEnd(parser, firstOutputMs)); } };
+      firstTimer = setTimeout(noWord, firstOutputMs);
+      totalTimer = setTimeout(() => { killTree(child); finish(parser.produced ? { error: 'cli_timeout', detail: 'the answer did not finish within ' + Math.round(timeoutMs / 1000) + ' s' } : quietEnd(parser, timeoutMs)); }, timeoutMs);
       const handle = (line) => {
         parser.feed(line);
         if (parser.produced) clearTimeout(firstTimer);
+        // The model is working (its reply opened, thinking is arriving): the wait for the first
+        // word starts again from now, so long thinking is not cut off at 45 s while it is still
+        // coming. A retry notice is not progress and does not move the wait.
+        else if (!settled && parser.beats !== beatsSeen) { beatsSeen = parser.beats; clearTimeout(firstTimer); firstTimer = setTimeout(noWord, firstOutputMs); }
+        // Signed out or refused, said twice: more tries cannot help, so the person hears it now.
+        if (!settled && !parser.produced && parser.retry && parser.retry.attempt >= 2 && (RETRY_SIGNED_OUT.test(parser.retry.error) || RETRY_NO_PLAN.test(parser.retry.error))) { killTree(child); finish(quietEnd(parser, now() - t0)); return; }
         if (parser.ended) finish(parser.error ? { error: parser.error, detail: parser.detail || parser.final.slice(0, 300) } : { text: parser.final, usage: parser.usage, costUsd: parser.costUsd, model: parser.model });
       };
       child.stdout.on('data', (chunk) => {
@@ -264,4 +310,4 @@ function pickWindowsCli(lines, exists = fs.existsSync) {
   return list[0];
 }
 
-module.exports = { createClaudePool, createParser, userMessage, classifyError, LOCKED_ARGS, pickWindowsCli };
+module.exports = { createClaudePool, createParser, userMessage, classifyError, LOCKED_ARGS, pickWindowsCli, quietEnd };

@@ -21,6 +21,7 @@ const { rms16, pcmToWav } = require('./src/wav');
 const { loadNusContext, appendNusContext, renderNusSummary } = require('./src/nus-context');
 const { appendEvent } = require('./src/nus-outbox');
 const { createProbe } = require('./src/win/probe');
+const { createOnTopGuard } = require('./src/win/on-top');
 const { createReflex, opensLikeGuideAsk } = require('./src/reflex');
 const { createFocusGuard, parseFocusCommand, COPY: FOCUS_COPY } = require('./src/reflex/focus-guard');
 const jev = require('./src/reflex/jev');
@@ -5297,8 +5298,19 @@ const TOPMOST_GUARD_TICKS = 16; // every ~2s at the 120ms probe cadence
 let topmostTick = 0;
 function reassertTopmost() {
   if (process.platform !== 'win32' || !win || win.isDestroyed() || !win.isVisible()) return;
-  try { if (!win.isAlwaysOnTop()) restoreTopmost('guard'); } catch (_) { /* window mid-teardown */ }
+  try { if (!win.isAlwaysOnTop()) { restoreTopmost('guard'); return; } } catch (_) { return; /* window mid-teardown */ }
+  // The bit is on. That is not the same as being on top (found 2026-11-20:
+  // the bit on, eleven ordinary windows drawn over the Knot), so ask what is
+  // really over the window and lift it (src/win/on-top.js).
+  onTopGuard.tick();
 }
+const onTopGuard = createOnTopGuard({
+  check: async (o) => {
+    if (!probeReady() || !win || win.isDestroyed() || !win.isVisible()) return null;
+    return probe.request('win.covered', Object.assign({ hwnd: win.getNativeWindowHandle().readUInt32LE(0) }, o), 1500);
+  },
+  log: (m) => routeLog(m),
+});
 // Measured 2026-09-10: focus() while a maximized app (monitor-sized, taskbar
 // auto-hidden) is in front drops the overlay to the bottom of the z-order and
 // clears its topmost bit, and Chromium then refuses HWND_TOPMOST from inside
