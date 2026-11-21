@@ -15,7 +15,7 @@ module.exports = {
   appId: 'com.nus.companion',
   productName: 'Nus Companion',
   copyright: base.copyright,
-  extraMetadata: { name: 'nus-companion', version: '0.1.30', main: 'src/main-companion.js', publik: PUBLIK,
+  extraMetadata: { name: 'nus-companion', version: '0.1.31', main: 'src/main-companion.js', publik: PUBLIK,
     description: 'Nūs Companion: the Knot that hears you and acts, on its own.' },
   directories: { output: 'dist-companion', buildResources: 'build' },
   // companion/** carries companion/src/stats.js (anonymous usage stats, plain
@@ -36,8 +36,8 @@ module.exports = {
     ...(MAC ? ['!companion/src/win/*.ps1', '!companion/src/reflex/hands.ps1', '!node_modules/sherpa-onnx-win-*/**'] : [])],
   // The voice runtime (sherpa-onnx, N-API) must sit on disk, not inside the asar, to load.
   asarUnpack: MAC
-    ? ['node_modules/onnxruntime-node/**', 'node_modules/sherpa-onnx-node/**', 'node_modules/sherpa-onnx-darwin-arm64/**', 'companion/src/voice/engine-worker.js']
-    : ['companion/src/win/ocr.ps1', 'node_modules/onnxruntime-node/**', 'node_modules/sherpa-onnx-node/**', 'node_modules/sherpa-onnx-win-x64/**', 'companion/src/voice/engine-worker.js'],
+    ? ['node_modules/onnxruntime-node/**', 'node_modules/sherpa-onnx-node/**', 'node_modules/sherpa-onnx-darwin-arm64/**', 'companion/src/voice/engine-worker.js', 'companion/src/voice/parakeet-worker.js']
+    : ['companion/src/win/ocr.ps1', 'node_modules/onnxruntime-node/**', 'node_modules/sherpa-onnx-node/**', 'node_modules/sherpa-onnx-win-x64/**', 'companion/src/voice/engine-worker.js', 'companion/src/voice/parakeet-worker.js'],
   afterPack: base.afterPack,
   // The Mac beta: an ad-hoc signed dmg (afterPack above, from the base config), arm64 first.
   // No Developer ID yet, so Gatekeeper asks once (Open Anyway). No zip and no latest-mac.yml:

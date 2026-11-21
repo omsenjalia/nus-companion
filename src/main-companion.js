@@ -288,6 +288,8 @@ function settingsPatch(patch) {
   if (patch.voice === 'system' || patch.voice === 'fable') clean.voice = patch.voice;
   // The microphone (Settings, Voice): a device id and its name, '' for the Windows default.
   for (const key of ['micDeviceId', 'micDeviceLabel']) if (typeof patch[key] === 'string' && patch[key].length <= 512) clean[key] = patch[key];
+  // What writes down a finished sentence: unset or parakeet means Parakeet once installed, whisper keeps Whisper (companion/src/voice/parakeet.js).
+  if (patch.speechModel === 'whisper' || patch.speechModel === 'parakeet') clean.speechModel = patch.speechModel;
   if (patch.apiKeys && typeof patch.apiKeys === 'object') {
     clean.apiKeys = {};
     for (const key of ['typesafe','gemini','anthropic','openai','nvidia']) if (typeof patch.apiKeys[key] === 'string' && patch.apiKeys[key].length <= 4096) clean.apiKeys[key] = patch.apiKeys[key].trim();
@@ -386,6 +388,7 @@ function registerHomeIpc() {
     usage: companion.usage ? companion.usage(1) : null,
     update: (() => { const u = updateState(); if (u.available && !u.dismissed) stats.updateOffered('card', u.available.version); return u; })(),
     voice: companion.voiceStatus ? companion.voiceStatus() : null,
+    speech: companion.speechStatus ? companion.speechStatus() : null,
     assignmentSpend: solveBudget.summary(process.env.NUS_ASSIGNMENT_BUDGET_FILE || path.join(userData, 'companion', 'assignment-budget.json')) }));
   handle('home:settings:get', publicSettings);
   handle('home:settings:set', settingsPatch);
@@ -479,6 +482,9 @@ function registerHomeIpc() {
   // The Knot's own voice: where it stands, and the one-time model download.
   handle('home:voice:status', () => companion.voiceStatus());
   handle('home:voice:install', name => companion.voiceInstall(String(name || 'fable')));
+  // Parakeet, the optional speech model: where it stands, and its one-time download.
+  handle('home:speech:status', () => companion.speechStatus());
+  handle('home:speech:install', () => companion.speechInstall());
   // Activity: the last 50 model requests from the usage ledger, in plain words.
   handle('home:activity', () => companion.activity());
   // Reminders and timers set by voice ("remind me at 4 to ..."): list and remove.
@@ -571,8 +577,13 @@ app.whenReady().then(async () => {
     // only, nothing from publik). Closing it quits; will-quit then sends signin_closed.
     const ui = require('../companion/src/publik/gate-window').createGateUI({ updating: fs.existsSync(path.join(userData, 'companion-settings.json')), icon: path.join(__dirname, '..', 'companion', 'tray-icon.png'),
       onScreen: gateCount.screen, onPress: gateCount.press });
-    const signed = await publik.module.ensureSignedIn(ui);
+    // 0.1.31: a person who signed in on this computer before gets in when publik does not answer
+    // (companion/src/publik/offline-pass.js). Anyone else meets publik's gate exactly as before.
+    const gate = await require('../companion/src/publik/offline-pass').passGate({ ensureSignedIn: (gateUi) => publik.module.ensureSignedIn(gateUi), ui, signedInBefore: publik.signedInBefore,
+      onBack: () => console.log('[publik] reachable again: signed in in the background') });
+    if (gate.offline) { console.log('[publik] no answer (' + gate.offline + '): opened for a person who signed in here before'); gateCount.screen('unreachable'); }
     ui.close();
+    const signed = gate.signed || { choice: publik.choice() };
     gateCount.passed(signed && signed.choice);
   }
   if (WINDOWS) examGuard.watch();
@@ -587,6 +598,7 @@ app.whenReady().then(async () => {
     showSettings: section => { const w = openHome(); const go = () => send('home:view', { view: 'settings', section: String(section || '') }); if (w.webContents.isLoading()) w.webContents.once('did-finish-load', go); else go(); },
     onCapturePolicy: () => { /* the dashboard stays visible to shares; the Knot alone follows the switch */ },
     onVoiceState: s => send('home:voice', s),
+    onSpeechState: s => send('home:speech', s),
     onReminders: rows => send('home:reminders', rows),
     onRecall: panel => send('home:recall', panel),
     onStateChange: s => send('home:state',s), getDesktopState: lifestyleSnapshot, folderContext: q => folders.context(q),

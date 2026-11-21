@@ -8,6 +8,7 @@ const path = require('path');
 const { app } = require('electron');
 const secrets = require('./secrets');
 const { createClaudePool } = require('./claude-pool');
+const { pickWindowsCli } = require('./claude-pool');
 
 const MODEL = 'claude-sonnet-5';
 const KEY_NAME = 'anthropic_api_key';
@@ -81,7 +82,7 @@ function detectCli() {
 function detectCliWindows() {
   return new Promise((resolve) => {
     execFile('where.exe', ['claude'], { windowsHide: true }, (error, stdout) => {
-      resolve(error ? null : (stdout.split(/\r?\n/).find((line) => line.trim()) || '').trim() || null);
+      resolve(error ? null : pickWindowsCli(stdout));
     });
   });
 }

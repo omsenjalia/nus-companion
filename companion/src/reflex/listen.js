@@ -17,6 +17,7 @@ const { pcmToWav, rms16 } = require('../wav');
 const { sharedWhisperServer, serverBeside, runnableCopy, audioCtxFor } = require('../../../src/whisper-server');
 // whisper-cli.exe on Windows; whisper-cli on a Mac (the Mac beta bundles one, built on the macOS runner).
 const CLI_NAME = process.platform === 'win32' ? 'whisper-cli.exe' : 'whisper-cli';
+const { echoesPrompt } = require('./prompt-echo');
 
 const RATE = 16000;
 const BYTES_PER_MS = (RATE * 2) / 1000;
@@ -28,8 +29,10 @@ const CFG = {
   partialEveryMs: 300,   // new audio needed before another partial
   maxSegmentMs: 9000,    // a segment is force-ended here (audio context stays small)
   finalBudgetMs: 3000,   // a final the resident whisper has not answered by now: it has stalled, whisper-cli takes over
+  betterFinalBudgetMs: 1500, // Parakeet answers in about 0.3 s (voice/parakeet.js); past this whisper answers instead
   slowPartialMs: 700,    // a final waits no longer than this for a partial that heard everything (they take 200 to 400 ms)
-  preRollMs: 200         // keep a little quiet before the first loud chunk
+  preRollMs: 200,        // keep a little quiet before the first loud chunk
+  wholeBudgetMs: 3500    // the careful decode of a whole press (about 1.2 s measured); past this the fast words stand
 };
 
 function findWhisper(userData) {
@@ -140,7 +143,11 @@ function clean(text, audioMs) {
   return t.length > 1 ? t : '';
 }
 
-function createListener({ userData, onPartial, onFinal, onCommand, log, transcribe, vocabulary, server: injectedServer, spawn: spawnFn }) {
+// finalEngine (optional, voice/parakeet.js): { name, wanted(), ready(), transcribe(pcm) -> words }.
+// When it is ready it answers every final, in place of whisper and of a reused
+// partial. Partials stay on whisper. Not loaded, an error, no words or over budget:
+// whisper answers at once, so a person is never left without words.
+function createListener({ userData, onPartial, onFinal, onCommand, log, transcribe, vocabulary, server: injectedServer, spawn: spawnFn, finalEngine }) {
   const say = log || (() => {});
   const found = transcribe ? { exe: 'x', model: 'x' } : findWhisper(userData);
   // The resident whisper (src/whisper-server.js): about 0.25 s less per
@@ -179,6 +186,21 @@ function createListener({ userData, onPartial, onFinal, onCommand, log, transcri
     fs.writeFileSync(wav, wavBytes);
     try { return clean(await runWhisper(found.exe, found.model, wav, ms, budgetMs, promptFor(), onChild, spawnFn), ms); }
     finally { try { fs.unlinkSync(wav); } catch (_) {} }
+  }
+
+  const engineCan = (fn) => { try { return Boolean(finalEngine && finalEngine[fn]()); } catch (_) { return false; } };
+
+  // Resolves to { text } with the engine's words, or { why } when whisper must answer.
+  async function betterFinal(pcm, ms) {
+    let timer = null;
+    try {
+      const overBudget = new Promise((_, reject) => { timer = setTimeout(() => reject(new Error('over budget')), CFG.betterFinalBudgetMs); });
+      const words = await Promise.race([finalEngine.transcribe(pcm), overBudget]);
+      const text = clean(words, ms);
+      return text ? { text } : { why: 'no words' };
+    } catch (e) {
+      return { why: String((e && e.message) || e).slice(0, 80) };
+    } finally { clearTimeout(timer); }
   }
 
   function resetSegment() { seg = []; segMs = 0; speechMs = 0; quietMs = 0; lastPartialAtMs = 0; speechEndedAt = 0; gen++; }
@@ -227,14 +249,15 @@ function createListener({ userData, onPartial, onFinal, onCommand, log, transcri
     const t0 = Date.now();
     // A partial of this segment is still running on less speech than there now
     // is: it cannot be the final, so stop it (whisper-cli) or hang up on it (the
-    // resident whisper) rather than wait up to its 1.2 s budget.
+    // resident whisper) rather than wait up to its 1.2 s budget. With a better
+    // engine ready no partial can be the final, however much it heard.
     const stop = (flight) => {
       flight.stopped = true;
       if (flight.child) { try { flight.child.kill(); } catch (_) { /* already done */ } }
       flight.ctl.abort();
     };
     const stoppable = (flight) => flight && !flight.stopped && (flight.child || server);
-    if (stoppable(inFlight) && inFlight.gen === mine && inFlight.speechMs !== spoke) {
+    if (stoppable(inFlight) && inFlight.gen === mine && (inFlight.speechMs !== spoke || engineCan('ready'))) {
       stop(inFlight);
       say('[listen] stale partial stopped (' + (reason === 'flush' ? 'at key up' : reason) + ')');
     }
@@ -249,18 +272,30 @@ function createListener({ userData, onPartial, onFinal, onCommand, log, transcri
     finalsWaiting--;
     if (session !== epoch) return;
     // Nothing was said after the last partial was cut: it already is the final.
-    if (lastPartial.gen === mine && lastPartial.speechMs === spoke && lastPartial.text) {
-      say('[listen] final 0ms (' + reason + ', reused partial,' + levels + ') "' + lastPartial.text + '"');
+    const whole = lastPartial.gen === mine && lastPartial.speechMs === spoke ? lastPartial.text : '';
+    const reused = (note, spent) => {
+      say('[listen] final ' + spent + 'ms (' + reason + ', reused partial,' + levels + ', whisper' + note + ') "' + whole + '"');
       // reason: 'pause' or 'max' means the person may still be mid-sentence;
       // 'flush' means the key came up and this is the end of what they said.
-      if (onFinal) onFinal(lastPartial.text, { heardAt, seg: mine, reason });
-      return;
-    }
+      if (onFinal) onFinal(whole, { heardAt, seg: mine, reason });
+    };
+    const up = engineCan('ready');
+    const notUp = !up && engineCan('wanted') ? ', ' + finalEngine.name + ' not loaded' : '';
+    if (whole && !up) { reused(notUp, 0); return; }
     busy = true;
     try {
+      const better = up ? await betterFinal(pcm, ms) : null;
+      if (session !== epoch) return;
+      if (better && better.text) {
+        say('[listen] final ' + (Date.now() - t0) + 'ms (' + reason + ', ' + Math.round(ms) + 'ms audio,' + levels + ', ' + finalEngine.name + ') "' + better.text + '"');
+        if (onFinal) onFinal(better.text, { heardAt, seg: mine, reason });
+        return;
+      }
+      const note = better ? ', ' + finalEngine.name + ' ' + better.why : notUp;
+      if (whole) { reused(note, better ? Date.now() - t0 : 0); return; }
       const text = await stt(pcm, ms);
       if (session !== epoch) return;
-      say('[listen] final ' + (Date.now() - t0) + 'ms (' + reason + ', ' + Math.round(ms) + 'ms audio,' + levels + ') "' + text + '"');
+      say('[listen] final ' + (Date.now() - t0) + 'ms (' + reason + ', ' + Math.round(ms) + 'ms audio,' + levels + ', whisper' + note + ') "' + text + '"');
       if (text && onFinal) onFinal(text, { heardAt, seg: mine, reason });
     } finally { busy = false; }
   }
@@ -283,15 +318,65 @@ function createListener({ userData, onPartial, onFinal, onCommand, log, transcri
     }
     seg.push(buf); segMs += ms;
     if (loud) { speechMs += ms; quietMs = 0; speechEndedAt = Date.now(); } else { quietMs += ms; }
-    if (quietMs >= CFG.pauseMs) { finish('pause'); return; }
-    if (segMs >= CFG.maxSegmentMs) { finish('max'); return; }
+    if (quietMs >= CFG.pauseMs) { lastFinish = finish('pause').catch((e) => { say('[listen] final failed: ' + (e && e.message)); }); return; }
+    if (segMs >= CFG.maxSegmentMs) { lastFinish = finish('max').catch((e) => { say('[listen] final failed: ' + (e && e.message)); }); return; }
     if (speechMs >= CFG.firstPartialMs && segMs - lastPartialAtMs >= CFG.partialEveryMs && !busy) { lastPartialAtMs = segMs; partial(); }
   }
 
-  // The key came up, or the mic closed: whatever is buffered is the end.
-  function flush() { return seg.length ? finish('flush') : Promise.resolve(); }
+  // The key came up, or the mic closed: whatever is buffered is the end. With
+  // nothing buffered it still waits for a final that a pause started a moment
+  // ago and whisper has not answered yet: until that lands the press is not
+  // over (it used to return at once, and the caller, seeing no final yet, said
+  // "I did not catch that" over words that arrived 200 ms later).
+  let lastFinish = Promise.resolve();
+  function flush() { return seg.length ? finish('flush') : lastFinish; }
 
-  return { push, flush, reset, available: Boolean(found.exe && found.model), resident: () => Boolean(server && server.status().state === 'ready'), CFG };
+  // The whole press, heard once more in one piece and with care (the resident
+  // whisper's careful decode, src/whisper-server.js). The fast pass above cuts
+  // the press at every pause, shrinks the encoder to each piece and takes the
+  // decoder's first guess: right for a command, and the reason a dictated
+  // sentence came out as "I just build a nap" with a full stop at each breath
+  // (live 2026-11-20). This is how OpenWhispr hears every dictation. -> the
+  // words, or '' when there is no answer worth having (no resident whisper, too
+  // slow, nothing heard, or the hint list said back): the caller keeps what the
+  // fast pass heard.
+  // With Parakeet loaded it hears the press instead: 15 of 16 of Pranav's
+  // clips at about 0.3 s against 13 or 14 at 1.3 s for the careful whisper
+  // (measured 2026-11-20); the careful whisper is the fallback.
+  async function whole(pcm, { budgetMs = CFG.wholeBudgetMs } = {}) {
+    if (!pcm || !pcm.length) return '';
+    const ms = pcm.length / BYTES_PER_MS;
+    if (engineCan('ready')) {
+      const session = epoch;
+      const t0 = Date.now();
+      let timer = null;
+      try {
+        const overBudget = new Promise((_, reject) => { timer = setTimeout(() => reject(new Error('over budget')), budgetMs); });
+        const text = clean(await Promise.race([finalEngine.transcribe(pcm), overBudget]), ms);
+        if (session !== epoch) return '';
+        if (text) { say('[listen] whole press ' + (Date.now() - t0) + 'ms (' + Math.round(ms) + 'ms audio, ' + finalEngine.name + ') "' + text + '"'); return text; }
+        say('[listen] whole press: ' + finalEngine.name + ' heard nothing, whisper tries');
+      } catch (e) { say('[listen] whole press: ' + finalEngine.name + ' ' + String((e && e.message) || e).slice(0, 60) + ', whisper tries'); }
+      finally { clearTimeout(timer); }
+    }
+    if (!server || server.status().state !== 'ready') return '';
+    const session = epoch;
+    while (busy) await new Promise((r) => setTimeout(r, 25));
+    busy = true;
+    try {
+      const prompt = promptFor();
+      const t0 = Date.now();
+      const words = await server.transcribe(pcmToWav(pcm, RATE, 1), { careful: true, prompt, timeoutMs: budgetMs });
+      if (words == null || session !== epoch) return '';
+      const text = clean(words, ms);
+      if (echoesPrompt(text, prompt)) { say('[listen] whole press: the hint list came back, not kept'); return ''; }
+      say('[listen] whole press ' + (Date.now() - t0) + 'ms (' + Math.round(ms) + 'ms audio) "' + text + '"');
+      return text;
+    } catch (e) { say('[listen] whole press failed: ' + (e && e.message)); return ''; }
+    finally { busy = false; }
+  }
+
+  return { push, flush, reset, whole, available: Boolean(found.exe && found.model), resident: () => Boolean(server && server.status().state === 'ready'), CFG };
 }
 
 module.exports = { findWhisper, createListener, audioCtxFor, collapseLoops, dropRepeatedSentences, plausible, clean, vocabularyPrompt, CFG };

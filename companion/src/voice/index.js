@@ -216,4 +216,4 @@ function createVoice({ userData, settings, log = () => {}, spawnFn = spawn, exec
   return { status, install, warm, synth, stop, close, setOnState, modelDir: () => { const v = wanted(); return v ? modelDir(v) : ''; }, idle: () => !pending.size, VOICES, MODELS };
 }
 
-module.exports = { createVoice, bundledRoots, VOICES, MODELS, DEFAULT_VOICE, IDLE_UNLOAD_MS, sha256File, extract, tarAttempts };
+module.exports = { createVoice, bundledRoots, VOICES, MODELS, DEFAULT_VOICE, IDLE_UNLOAD_MS, sha256File, extract, tarAttempts, download };

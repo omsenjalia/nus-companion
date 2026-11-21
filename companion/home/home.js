@@ -34,6 +34,7 @@
     if (s.stats) paintStats(s.stats);
     if (s.update) paintUpdate(s.update);
     if (s.voice) paintVoice(s.voice);
+    if (s.speech) paintSpeech(s.speech);
   }
   // The Knot's own voice row: the switch reflects the setting; the note says
   // installed, downloading (with progress), or how big the one-time download is.
@@ -59,6 +60,34 @@
     paintVoice(await api.voiceStatus());
   });
   api.on('home:voice', v => paintVoice(v));
+  // The optional speech model row, the same shape as the voice row above.
+  function paintSpeech(v) {
+    const box = $('#speech-model'), note = $('#speech-model-note'), prog = $('#speech-model-progress');
+    if (!box) return;
+    box.checked = v.on;
+    if (v.downloading) {
+      const pct = v.downloading.total ? Math.round(100 * v.downloading.got / v.downloading.total) : 0;
+      prog.hidden = false; prog.textContent = 'Downloading the speech model… ' + pct + '% (' + Math.round(v.downloading.got / 1048576) + ' of ' + Math.round(v.downloading.total / 1048576) + ' MB)';
+      box.disabled = true;
+      return;
+    }
+    box.disabled = false; prog.hidden = true;
+    const mem = 'It uses about 800 MB of memory while loaded and lets go after ' + v.idleMinutes + ' quiet minutes.';
+    note.textContent = !v.installed && v.on ? 'Parakeet by NVIDIA (CC-BY-4.0) writes down what you say: it hears you better than the built-in model. It downloads by itself in the background, once (about ' + Math.round(v.modelBytes / 1048576) + ' MB, about 640 MB on disk); until then the built-in Whisper model does it. ' + mem + ' Nothing leaves your machine. Turn this off to keep Whisper and skip the download.'
+      : !v.installed ? 'Parakeet by NVIDIA (CC-BY-4.0), a larger model that runs on this computer and writes down each finished sentence. One download of about ' + Math.round(v.modelBytes / 1048576) + ' MB the first time, about 640 MB on disk. ' + mem + ' Nothing leaves your machine. Off, the built-in Whisper model does it.'
+      : !v.on ? 'Parakeet is installed and off. The built-in Whisper model writes down what you say.'
+      : v.failed ? 'Parakeet did not load, so the built-in Whisper model is writing down what you say. Turn this off and on to try again.'
+      : v.ready ? 'Parakeet is loaded and listening. ' + mem : 'Parakeet is installed. It loads when you press the talk key. ' + mem;
+  }
+  $('#speech-model').onchange = e => run(async () => {
+    const on = e.target.checked;
+    if (!on) { await api.settingsSet({ speechModel: 'whisper' }); paintSpeech(await api.speechStatus()); notice('Back to the built-in speech model.'); return; }
+    let v = await api.speechStatus();
+    if (!v.installed) { notice('Downloading Parakeet. The switch turns on by itself when it is in.'); v = await api.speechInstall(); }
+    if (v.installed) { await api.settingsSet({ speechModel: 'parakeet' }); notice('Parakeet is on.'); }
+    paintSpeech(await api.speechStatus());
+  });
+  api.on('home:speech', v => paintSpeech(v));
   // A newer Companion: the card shows once per version until Later or Download.
   let updateUrl = null, updateOneClick = false;
   function paintUpdate(u) {

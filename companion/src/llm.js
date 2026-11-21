@@ -205,6 +205,35 @@ async function completeGemini({ apiKey, model, system, turns, imageDataUrl, maxT
   return (res && typeof res.text === 'string') ? res.text : (res && res.text) || '';
 }
 
+// Gemini answers 503 "This model is currently experiencing high demand" in bursts, and its SDK does
+// not try again by itself (the OpenAI and Anthropic SDKs do). On 2026-11-21 seven first-day users
+// sent that error from their first few asks. One quiet second try, and only when it is safe: nothing
+// has been said or shown yet, nobody pressed stop, and it is not an assignment lane (those settle
+// their own failures). A second failure is thrown as it is, so the person still gets the plain line.
+const BUSY_RETRY_MS = 700;
+function isBusy(err) {
+  if (!err) return false;
+  const status = Number(err.status || err.code);
+  if (status === 502 || status === 503 || status === 504 || status === 529) return true;
+  return /\b50[234]\b|\b529\b|UNAVAILABLE|overloaded|high demand/i.test(String(err.message || err));
+}
+function withBusyRetry(fn, waitMs = BUSY_RETRY_MS) {
+  return async (args) => {
+    let said = false;
+    const heard = (cb) => (typeof cb === 'function' ? (t) => { said = true; return cb(t); } : cb);
+    const a = { ...args, onToken: heard(args.onToken), onDelta: heard(args.onDelta) };
+    const stopped = () => !!(args.signal && args.signal.aborted);
+    try { return await fn(a); } catch (err) {
+      if (said || stopped() || args.assignment || !isBusy(err)) throw err;
+      await new Promise((resolve) => setTimeout(resolve, waitMs));
+      if (stopped()) throw err;
+      return fn(a);
+    }
+  };
+}
+const geminiStream = withBusyRetry(streamGemini);
+const geminiComplete = withBusyRetry(completeGemini);
+
 // publik API (companion/src/publik): only in a build with the publik switch on, and only when the
 // person picked "Connect your plan". Same OpenAI-compatible path as above, tier names only.
 let publik = null;
@@ -256,7 +285,7 @@ function createLLM(settings) {
       if (provider === 'openai') return streamOpenAI(args);
       if (provider === 'nvidia') return streamOpenAI({ ...args, baseURL: 'https://integrate.api.nvidia.com/v1' });
       if (provider === 'anthropic') return streamAnthropic(args);
-      if (provider === 'gemini') return streamGemini(args);
+      if (provider === 'gemini') return geminiStream(args);
       throw new Error('unknown provider: ' + provider);
     },
     async complete(params) {
@@ -264,7 +293,7 @@ function createLLM(settings) {
       // walkthrough wants the smart tier). Unset leaves the configured one.
       // params.onDelta: streamed text for callers that can use it as it arrives.
       const args = { apiKey, maxTokens: params.maxTokens || 512, ...paramsWithComputer(params), model: params.model || model, onToken: params.onToken || params.onDelta || (() => {}) };
-      if (provider === 'gemini') return completeGemini(args);
+      if (provider === 'gemini') return geminiComplete(args);
       // The other SDKs stream fine; collect and return.
       if (provider === 'openai') return streamOpenAI(args);
       if (provider === 'nvidia') return streamOpenAI({ ...args, baseURL: 'https://integrate.api.nvidia.com/v1' });
@@ -274,4 +303,4 @@ function createLLM(settings) {
   };
 }
 
-module.exports = { createLLM, streamOpenAI, PUBLIK_IDLE_AFTER_TEXT_MS, LOOKS_FINISHED };
+module.exports = { createLLM, streamOpenAI, PUBLIK_IDLE_AFTER_TEXT_MS, LOOKS_FINISHED, withBusyRetry, isBusy, BUSY_RETRY_MS };

@@ -10,7 +10,7 @@ test('actual listener routes early voice commands while assignment, selection an
   const ctx = { listener: null, app: { getPath: () => 'unused' }, console,
     ptt: { held: true, finals: 0 }, selection: {}, state: { busy: true }, assignment: { isOn: () => true },
     earlyVoiceCommand: require('../src/guide/assignment-router').earlyVoiceCommand,
-    createListener: options => options, routeUtterance: (...args) => routed.push(args), heardSegment: () => {}, showHeard: () => {} };
+    createListener: options => options, getParakeet: () => null, routeUtterance: (...args) => routed.push(args), heardSegment: () => {}, showHeard: () => {} };
   vm.runInNewContext(body + '; getListener();', ctx);
   assert.equal(ctx.listener.onCommand('voice mode', {seg:1}), false);
   assert.equal(ctx.listener.onCommand('voice mode off', {seg:1,heardAt:123}), true);

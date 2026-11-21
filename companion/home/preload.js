@@ -21,8 +21,9 @@ contextBridge.exposeInMainWorld('home', {
   accountSync: on => invoke('account:sync', on), accountSyncNow: () => invoke('account:sync-now'),
   updateCheck: () => invoke('update:check'), updateDismiss: () => invoke('update:dismiss'), updateRun: () => invoke('update:run'),
   voiceStatus: () => invoke('voice:status'), voiceInstall: name => invoke('voice:install', name),
+  speechStatus: () => invoke('speech:status'), speechInstall: () => invoke('speech:install'),
   tasksList: () => invoke('tasks:list'), taskAction: p => invoke('task:action', p), projectContinue: id => invoke('project:continue', id), knotWord: () => invoke('knot:word'),
   tourState: () => invoke('tour:state'), tourStart: () => invoke('tour:start'), tourSkip: () => invoke('tour:skip'),
   reminders: () => invoke('reminders:list'), removeReminder: id => invoke('reminders:remove', id), activity: () => invoke('activity'),
-  on: (channel, cb) => { if (!['home:state','home:indexing','home:save-state','home:view','home:voice','home:recall','home:tour','home:settings','home:tasks','home:knot','home:account','home:contact','home:update','home:reminders'].includes(channel)) return; const listener=(_e,value)=>cb(value); ipcRenderer.on(channel,listener); return () => ipcRenderer.removeListener(channel,listener); }
+  on: (channel, cb) => { if (!['home:state','home:indexing','home:save-state','home:view','home:voice','home:speech','home:recall','home:tour','home:settings','home:tasks','home:knot','home:account','home:contact','home:update','home:reminders'].includes(channel)) return; const listener=(_e,value)=>cb(value); ipcRenderer.on(channel,listener); return () => ipcRenderer.removeListener(channel,listener); }
 });

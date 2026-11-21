@@ -3,7 +3,7 @@ const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const http = require('http');
 const { EventEmitter } = require('events');
-const { createWhisperServer, formBody, audioCtxFor } = require('./whisper-server');
+const { createWhisperServer, formBody, audioCtxFor, CAREFUL_FIELDS } = require('./whisper-server');
 
 function fakeChild() {
   const c = new EventEmitter();
@@ -231,4 +231,22 @@ test('the request really hangs up when the signal fires', async () => {
   await seen;
   srv.close();
   await assert.rejects(httpRequest({ port: 1, path: '/x', signal: ctl.signal }), /aborted/, 'already aborted: nothing is sent');
+});
+
+test('a careful decode keeps the whole context and searches; the fast one is unchanged', async () => {
+  const { s, calls } = harness();
+  await s.warm();
+  await s.transcribe(Buffer.from('RIFFwav'), { careful: true, prompt: 'Nūs Companion.', timeoutMs: 3500 });
+  await s.transcribe(Buffer.from('RIFFwav'), { audioCtx: 448, prompt: 'Nūs Companion.' });
+  const [careful, fast] = calls.requests.filter((r) => r.method === 'POST').map((r) => r.body.toString('utf8'));
+  assert.deepEqual(CAREFUL_FIELDS, { beam_size: '5', temperature_inc: '0' });
+  assert.match(careful, /name="beam_size"\r\n\r\n5\r\n/);
+  assert.match(careful, /name="temperature_inc"\r\n\r\n0\r\n/);
+  assert.match(careful, /name="prompt"\r\n\r\nNūs Companion\.\r\n/);
+  assert.doesNotMatch(careful, /name="audio_ctx"/, 'no context cut: the encoder keeps its 30 s');
+  assert.doesNotMatch(careful, /name="best_of"/);
+  assert.match(fast, /name="audio_ctx"\r\n\r\n448\r\n/);
+  assert.match(fast, /name="best_of"\r\n\r\n1\r\n/);
+  assert.doesNotMatch(fast, /name="beam_size"/);
+  s.close();
 });

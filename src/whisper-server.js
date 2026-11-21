@@ -53,6 +53,26 @@ function audioCtxFor(ms) {
   return Math.max(256, Math.min(1500, Math.ceil(need / 64) * 64));
 }
 
+// The careful decode, for a whole press whose words will be typed or saved. The
+// idea is OpenWhispr's (github.com/OpenWhispr/openwhispr, src/helpers/whisperServer.js,
+// MIT; see THIRD-PARTY.md): send the whole recording once and let the encoder
+// keep its full 30 s context, instead of a context cut to the clip. Here the
+// decoder also searches (beam 5) and never re-rolls (temperature_inc 0).
+// Measured 2026-11-20 on Pranav's 16 recorded commands, base.en q5_1, this
+// machine, each setting run two to five times:
+//   the fast fields       12 of 16 right every time, 14.9% of words wrong, 0.25 s
+//   whole context, greedy 13 of 16 every time,        7.5%,               1.2 s
+//   these fields          13 or 14 (14, 13, 14),      4.5 to 9%,          1.3 to 1.6 s
+//   OpenWhispr's own      12 to 14 over five runs,    3 to 10%,           1.2 to 1.7 s
+// (its request keeps the re-rolls and raises entropy_thold and logprob_thold;
+// that is where the spread comes from, so those two are not sent). The gain is
+// the whole context: it is what turned "Make a clatter" back into "make it
+// quieter". What is still missed ("created to do lists", "Surge Norbert
+// Wiener") is the size of the model: small.en heard 15 of 16 the same way but
+// took 4.3 s here. Too slow for a partial or a command; right for a sentence
+// about to be typed.
+const CAREFUL_FIELDS = Object.freeze({ beam_size: '5', temperature_inc: '0' });
+
 // The server binary next to a whisper-cli, if the release shipped one.
 function serverBeside(cliPath) {
   if (!cliPath) return null;
@@ -160,13 +180,18 @@ function createWhisperServer({ exe, model, threads, spawn = nodeSpawn, request =
   // answer right now (the caller then runs whisper-cli). partial: a guess at
   // words still being said, so one that runs late costs a strike, not a restart.
   // signal: the caller no longer wants this one (its final has arrived).
-  async function transcribe(wav, { audioCtx, prompt, timeoutMs = 8000, signal = null, partial = false } = {}) {
+  // careful: one slower decode of a whole press, for words that will be typed or
+  // saved (CAREFUL_FIELDS above). The fast fields stay as they were for the rest.
+  async function transcribe(wav, { audioCtx, prompt, timeoutMs = 8000, signal = null, partial = false, careful = false } = {}) {
     if (state !== 'ready') { warm(); return null; }
     if (abandonedAt != null && now() - abandonedAt < abandonMs) return null;
     abandonedAt = null;
     lastUse = now();
     const askedAt = now(), asked = child;
-    const { boundary, body } = formBody({ response_format: 'json', language: 'en', temperature_inc: '0', best_of: '1', no_timestamps: 'true', audio_ctx: audioCtx ? String(audioCtx) : '', prompt: prompt || '' }, wav);
+    const fields = careful
+      ? Object.assign({ response_format: 'json', language: 'en', audio_ctx: audioCtx ? String(audioCtx) : '', prompt: prompt || '' }, CAREFUL_FIELDS)
+      : { response_format: 'json', language: 'en', temperature_inc: '0', best_of: '1', no_timestamps: 'true', audio_ctx: audioCtx ? String(audioCtx) : '', prompt: prompt || '' };
+    const { boundary, body } = formBody(fields, wav);
     try {
       const r = await request({ port, path: prefix + route, method: 'POST', headers: { 'Content-Type': 'multipart/form-data; boundary=' + boundary, 'Content-Length': body.length }, body, timeoutMs, signal });
       if (r.status !== 200) { log('[whisper-server] HTTP ' + r.status); return null; }
@@ -238,4 +263,4 @@ function runnableCopy(cliPath, userData, { platform = process.platform, fsImpl =
   }
 }
 
-module.exports = { createWhisperServer, sharedWhisperServer, serverBeside, runnableCopy, formBody, audioCtxFor, httpRequest };
+module.exports = { createWhisperServer, sharedWhisperServer, serverBeside, runnableCopy, formBody, audioCtxFor, httpRequest, CAREFUL_FIELDS };

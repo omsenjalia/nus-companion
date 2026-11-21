@@ -16,7 +16,7 @@ const path = require('path');
 const jev = require('./jev');
 const { createRulesClient } = require('./rules');
 const PASS_FILLER = /^\s*(?:(?:alright|okay|ok|great|cool|nice|hmm+|uh+|um+|yeah|yes|no|right|so|well|hold on|one sec|wait|it's okay|its okay|never mind|nevermind|thanks|thank you)[\s.,!?]*)+$/i;
-const { route, splitClauses, POLICY } = require('./router');
+const { route, splitClauses, typePayload, plainDictation, POLICY } = require('./router');
 const { loadCatalog } = require('./catalog');
 const { createExecutor, browserExe } = require('./executor');
 const routines = require('./routines');
@@ -99,10 +99,10 @@ function createReflex({ probe, hands, shell, log, vaultDir, notesFile, onFire, o
 
   function enabled() { return client.ready() && process.env.NUS_REFLEX !== '0'; }
 
-  async function decideClause(clause, final) {
-    const key = (final ? 'F|' : 'P|') + clause.toLowerCase();
+  async function decideClause(clause, final, keyed) {
+    const key = (final ? 'F|' : 'P|') + (keyed ? 'K|' : '') + clause.toLowerCase();
     if (cache.has(key)) return Object.assign({}, cache.get(key), { ms: 0, cached: true });
-    const d = await route(clause, { final, apps, context: session, jev: client, log: say });
+    const d = await route(clause, { final, apps, context: session, jev: client, log: say, keyed });
     if (cache.size > 200) cache.clear();
     cache.set(key, d);
     return d;
@@ -249,9 +249,14 @@ function createReflex({ probe, hands, shell, log, vaultDir, notesFile, onFire, o
   // seconds and glued to the front of whatever is said next.
   const DANGLING = /(?:^|[\s,.;])(?:(?:can|could|would) you |please |and |then |now |lets |let's )*(?:type|write|enter|search(?: for)?|google(?: search)?|look up|add a note|make a note|remember(?: that)?|remind me(?: to)?|open(?: up)?|go to|launch|make the title say|say|that says)[\s,.!?]*$/i;
   const CARRY_MS = 6000;
+  // "Open Notepad and type" ... and then the sentence, once Notepad is up (live
+  // 2026-11-20: 12 s later, the held "type" was gone and the sentence went to
+  // the guide). A held "type" waits longer than a held "open" or "search": what
+  // follows it can only be its text.
+  const CARRY_TYPE_MS = 15000;
   let carry = { text: '', at: 0 };
   function withCarry(text) {
-    if (carry.text && Date.now() - carry.at < CARRY_MS) return carry.text + ' ' + text;
+    if (carry.text && Date.now() - carry.at < (/^(?:type|write)\b/i.test(carry.text) ? CARRY_TYPE_MS : CARRY_MS)) return carry.text + ' ' + text;
     return text;
   }
 
@@ -275,13 +280,17 @@ function createReflex({ probe, hands, shell, log, vaultDir, notesFile, onFire, o
     const final = !opts || opts.final !== false;
     const heardAt = (opts && opts.heardAt) || Date.now();
     const uttId = opts && opts.uttId != null ? String(opts.uttId) : 'default';
+    // The talk key or the keyboard, not the open room mic (see router.js decide).
+    const keyed = Boolean(opts && opts.keyed);
     if (!enabled()) return Promise.resolve({ handled: false, brainText: final ? text : null });
     text = withCarry(String(text || ''));
     if (final) {
       carry = { text: '', at: 0 };
-      const clauses = splitClauses(text);
+      const clauses = splitClauses(text, { keyed });
       const last = clauses[clauses.length - 1] || '';
-      const m = DANGLING.exec(last);
+      // A sentence being typed may end in any word ("type I love to write"):
+      // its last word is text, not a verb waiting for more.
+      const m = keyed && plainDictation(last) ? null : DANGLING.exec(last);
       // The verb is held; anything said before it in the same clause still runs:
       // "create a new note type" runs the new note now and keeps "type" for later.
       if (m) {
@@ -290,17 +299,24 @@ function createReflex({ probe, hands, shell, log, vaultDir, notesFile, onFire, o
         say('[reflex] holding "' + carry.text + '" for what comes next');
         text = clauses.slice(0, -1).concat(front ? [front] : []).join(', ');
         if (!text) return Promise.resolve({ handled: true, brainText: null, held: carry.text });
+      } else if (typePayload(last) === '') {
+        // "Type in.", "Can you type in the notepad?": the verb and where, and
+        // the words still to come (live 2026-11-20: "in" and "the notepad" were typed).
+        carry = { text: 'type', at: Date.now() };
+        say('[reflex] holding "type" for what comes next ("' + last.slice(0, 40) + '")');
+        text = clauses.slice(0, -1).join(', ');
+        if (!text) return Promise.resolve({ handled: true, brainText: null, held: carry.text });
       }
     }
     if (!final) {
       if (partialBusy) return Promise.resolve({ handled: false, brainText: null });
       partialBusy = true;
-      partialRun = step(text, false, heardAt, getUtt(uttId)).catch((e) => { say('[reflex] partial error: ' + e.message); return { handled: false, brainText: null }; }).finally(() => { partialBusy = false; });
+      partialRun = step(text, false, heardAt, getUtt(uttId), keyed).catch((e) => { say('[reflex] partial error: ' + e.message); return { handled: false, brainText: null }; }).finally(() => { partialBusy = false; });
       return partialRun;
     }
     // The final pass waits for a partial still in flight, so a clause that is
     // firing early right now is never fired a second time.
-    chain = chain.then(() => partialRun).then(() => step(text, true, heardAt, getUtt(uttId))).catch((e) => { say('[reflex] error: ' + e.message); return { handled: false, brainText: text }; });
+    chain = chain.then(() => partialRun).then(() => step(text, true, heardAt, getUtt(uttId), keyed)).catch((e) => { say('[reflex] error: ' + e.message); return { handled: false, brainText: text }; });
     const out = chain;
     chain = chain.then(() => { utts.delete(uttId); });
     return out;
@@ -316,14 +332,15 @@ function createReflex({ probe, hands, shell, log, vaultDir, notesFile, onFire, o
   // "help me make a pivot table": the "make" is part of the ask, not a second
   // command. A clause that opens like a request for guidance is never cut, which
   // also saves the Jev call that only existed to find that out.
-  async function splitAtVerb(clause) {
+  async function splitAtVerb(clause, keyed) {
     if (GUIDE_OPEN.test(clause.trim())) return null;
+    if (keyed && plainDictation(clause)) return null;   // a sentence being typed is never cut
     const ws = clause.split(/\s+/).filter(Boolean);
     for (let k = 2; k < ws.length - 0; k++) {
       if (!VERB_AT.test(ws[k].replace(/[^a-z]/gi, ''))) continue;
       const front = ws.slice(0, k).join(' ');
       let d;
-      try { d = await decideClause(front, true); } catch (_) { return null; }
+      try { d = await decideClause(front, true, keyed); } catch (_) { return null; }
       if (d.fire && !CARRIES_TEXT.has(d.intent) && d.confidence >= 0.8) return [front, ws.slice(k).join(' ')];
       return null;   // the first candidate decides: no fishing for a cut that works
     }
@@ -334,12 +351,12 @@ function createReflex({ probe, hands, shell, log, vaultDir, notesFile, onFire, o
   // looks at what is already done. (First attempt cut inside the loop: the
   // partial pass marked piece 0 = "open notepad" done, the final pass saw piece
   // 0 = the whole uncut sentence, called it done, and ran nothing after it.)
-  async function pieces(text) {
+  async function pieces(text, keyed) {
     const out = [];
-    for (const clause of splitClauses(text)) {
+    for (const clause of splitClauses(text, { keyed })) {
       let rest = clause;
       for (let guard = 0; guard < 6; guard++) {
-        const cut = await splitAtVerb(rest);
+        const cut = await splitAtVerb(rest, keyed);
         if (!cut) break;
         out.push(cut[0]); rest = cut[1];
       }
@@ -350,8 +367,8 @@ function createReflex({ probe, hands, shell, log, vaultDir, notesFile, onFire, o
 
   const CHAIN_KEYS = new Set(['volume_up', 'volume_down', 'mute', 'play_pause', 'snap_left', 'snap_right', 'maximize', 'minimize', 'screenshot']);
   const CHAIN_MIN = 0.7;
-  async function step(text, final, heardAt, utt) {
-    const clauses = await pieces(text);
+  async function step(text, final, heardAt, utt, keyed) {
+    const clauses = await pieces(text, keyed);
     const brain = [];
     let fired = 0;
     let down = false;
@@ -362,7 +379,7 @@ function createReflex({ probe, hands, shell, log, vaultDir, notesFile, onFire, o
       // Fired early on its first words: nothing more to do for this piece.
       if (utt.early.has(i)) { if (clauseFinal) { utt.early.delete(i); utt.done.add(i); } fired++; continue; }
       let d;
-      try { d = await decideClause(clauses[i], clauseFinal); }
+      try { d = await decideClause(clauses[i], clauseFinal, keyed); }
       catch (e) {
         say('[reflex] jev failed: ' + e.message);
         // Jev being down is not a reason to wake the slow thinking model with a

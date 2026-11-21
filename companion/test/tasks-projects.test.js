@@ -461,7 +461,7 @@ test('all three doors ask before the reflex layer and the guide, and the default
   assert.ok(typed < main.indexOf("getGuide().start(p.text, p.source || 'typed'"), 'typed: ahead of the guide');
   // Voice, fast: ahead of the reflex layer.
   const fast = main.indexOf('routeProjectAsk(text, source, heardAt)) return;');
-  assert.ok(fast > 0 && fast < main.indexOf('r.handle(text, { final: true, heardAt, uttId })'), 'voice: ahead of the reflex layer');
+  assert.ok(fast > 0 && fast < main.indexOf('r.handle(text, { final: true, heardAt, uttId, keyed: !openMicSource(source) })'), 'voice: ahead of the reflex layer');
   // Voice, slow: ahead of Hands and the guide.
   const slow = main.indexOf('routeProjectAsk(kind.text, source, heardAt)) return;');
   assert.ok(slow > 0 && slow < main.indexOf('function routeAnswer('), 'slow: ahead of the answer path');

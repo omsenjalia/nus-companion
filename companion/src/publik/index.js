@@ -24,6 +24,10 @@ function setChoice(c) { mod.setChoice(c === 'publik' || c === 'own_key' ? c : nu
 // Signed in with publik on this computer, and answering with an own key or Claude Code: the
 // person can move to publik in one tap when that key stops working (0.1.22).
 function canSwitch() { return on() && !process.env.PUBLIK_API_KEY && !!mod.readCredential() && choice() !== 'publik'; }
+// This computer has been all the way through Sign in with publik before: its key is on disk and the
+// "who answers" choice was made, which the module only writes after publik said the account is
+// signed in. offline-pass.js lets such a person open Nūs when publik does not answer.
+function signedInBefore() { return on() && !process.env.PUBLIK_API_KEY && !!choice(); }
 
 // Who publik says this computer is signed in as. null when publik cannot be reached or nobody is signed in.
 // -> { handle: '@name' | '', claimed: boolean }
@@ -98,4 +102,4 @@ function errorLine(e) {
   return '';
 }
 
-module.exports = { on, active, choice, provider, setChoice, canSwitch, who, signOut, model, TIERS, prepareImage, readError, errorLine, FREE_WEEK_402, MAX_IMAGE_CHARS, module: mod };
+module.exports = { on, active, choice, provider, setChoice, canSwitch, signedInBefore, who, signOut, model, TIERS, prepareImage, readError, errorLine, FREE_WEEK_402, MAX_IMAGE_CHARS, module: mod };

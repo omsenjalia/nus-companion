@@ -86,8 +86,27 @@ const POLICY = {
 const VERBS = '(?:can you |could you |please |lets |let\'s |now )*(?:open|launch|start|search|google|look up|type|write|create|make|close|switch|snap|move|take|go to|play|pause|mute|turn|add|remember|remind|what|help|show|teach|walk me|guide me|explain|how do i|how can i|how to|where is|where\'s|where are|where do i|point|maximize|minimize|keep me off|block|let me back|shrink|grow|get smaller|get bigger|go back|come back|lower|raise)';
 const SPLIT = new RegExp('\\s*(?:[,.;!?]+\\s+(?=' + VERBS + '\\b)|(?:,?\\s*\\band then\\b|,?\\s*\\bthen\\b|,?\\s*\\band\\b)\\s+(?=' + VERBS + '\\b))', 'i');
 
-function splitClauses(text) {
-  return String(text || '').split(SPLIT).map((s) => s.trim()).filter(Boolean);
+// keyed: the words came through the talk key or the keyboard. There, once a
+// clause opens "type ...", everything after it is the text to type and is never
+// cut again: a dictated sentence is full of command words ("... lets you speak
+// and type at the speed of light" was cut at "and type", and whisper's full stop
+// before "Make it count." made that a command; live 2026-11-20).
+function splitClauses(text, opts) {
+  const t = String(text || '');
+  if (!(opts && opts.keyed)) return t.split(SPLIT).map((s) => s.trim()).filter(Boolean);
+  const re = new RegExp(SPLIT.source, 'gi');
+  const out = [];
+  let at = 0;
+  for (let m = re.exec(t); m; m = re.exec(t)) {
+    if (!m[0].length) { re.lastIndex++; continue; }
+    const piece = t.slice(at, m.index).trim();
+    if (piece && plainDictation(piece)) break;
+    if (piece) out.push(piece);
+    at = m.index + m[0].length;
+  }
+  const rest = t.slice(at).trim();
+  if (rest) out.push(rest);
+  return out;
 }
 
 function words(text) {
@@ -131,11 +150,66 @@ function buildQuestions(clause, apps) {
 // 2026-09-21: Jev's END word is reliable, its START word wavers between
 // neighbours on notes, e.g. "akrit" 0.53 over "call").
 const POLITE = '(?:(?:can|could|would) you |please |lets |let\'s |now |and |then |just )*';
+// Whisper writes the breath after the verb as a comma, a full stop or a question
+// mark: "Type, I just built an app.", "Can you type? I just wrote an app." (live
+// 2026-11-20: with only a space allowed here the comma form missed the prefix, the
+// ask hung on the classifier's mood and mostly went to the guide, which said
+// "Let me look" and pointed at the text box).
+const AFTER_VERB = '(?:\\s*[,.:;!?]+\\s*|\\s+)';
+// "write this down", "write these down", "type it out": the verb's own words,
+// never the text.
+const IT_DOWN = '(?:type|write)\\s+(?:this|that|these|those|it)\\s+(?:down|out|in|up)';
+const TYPE_VERB = '(?:' + IT_DOWN + '|type(?:\\s+(?:out|in))?|write(?:\\s+(?:down|out))?|enter)';
 const PREFIX = {
   remember_note: new RegExp('^' + POLITE + '(?:add (?:a |another )?(?:quick )?note(?: that| to| saying|:)?|make a note(?: that| to| of)?|take a note(?: that| to)?|remember(?: that| to)?|remind me(?: that| to)?|note(?: down)?(?: that)?)\\s+', 'i'),
-  type_text: new RegExp('^' + POLITE + '(?:type(?: out| in)?|write(?: down| out)?|enter)\\s+(?!a title|the title)', 'i'),
+  type_text: new RegExp('^' + POLITE + TYPE_VERB + AFTER_VERB + '(?!a title|the title)', 'i'),
   web_search: new RegExp('^' + POLITE + '(?:(?:google |web )?search(?: the web| google| online)?(?: for)?|google|look up|look for)\\s+', 'i')
 };
+// "Type in Notepad. I just built an app": where to type is not what to type (live
+// 2026-11-20: "Notepad, I just built an app" went into Notepad). A place that can
+// only be a place goes on sight; a name that is also a word ("word", "code", "x",
+// "docs") goes only with the pause whisper writes after it ("in Word, hello"), so
+// "type in the word hello" keeps its words.
+const PLACE_SURE = '(?:(?:this|the|my)\\s+)?(?:notepad|note pad|chrome|firefox|edge|discord|slack|excel|powerpoint|outlook|onenote|google docs|vs ?code|gmail|whatsapp|telegram)|(?:this|the|my)\\s+(?:document|doc|text (?:box|field|area|editor)|search (?:box|bar)|box|field)';
+const PLACE_MAYBE = '(?:(?:this|the|my)\\s+)?(?:word|docs|sheets|slides|code|teams|mail|terminal|powershell|canvas|x|twitter|reddit|youtube|chatgpt|claude|instagram|linkedin|github|zoom|paint|browser|chat|note|file|window|app|page|tab|here|there)';
+const PLACE = '(?:(?:' + PLACE_SURE + ')\\b(?:\\s*[,.:;!?]+\\s*|\\s+|$)|(?:' + PLACE_MAYBE + ')\\b(?:\\s*[,.:;!?]+\\s*|\\s*$))';
+// "type in notepad ...": the verb took the "in". "write in notepad ...", "type
+// into the document ...": the place brings its own. Without a place after it the
+// word stays in the text ("type on my way").
+const VERB_TOOK_IN = /\bin[\s,.:;!?]*$/i;
+const PLACE_LEAD = new RegExp('^' + PLACE, 'i');
+const PLACE_LEAD_PREP = new RegExp('^(?:in|into|inside|on|onto)\\s+' + PLACE, 'i');
+// The words after a "type ..." opening, with the verb and any place cut off: ''
+// when the verb (and place) is all there is, null when the clause does not open
+// that way. Code reads this; no model is asked.
+function typePayload(clause) {
+  const text = String(clause || '').trim();
+  const pre = PREFIX.type_text.exec(text);
+  if (!pre) return null;
+  let rest = text.slice(pre[0].length);
+  const place = (VERB_TOOK_IN.test(pre[0]) ? PLACE_LEAD : PLACE_LEAD_PREP).exec(rest);
+  if (place) rest = rest.slice(place[0].length);
+  return tidy(rest);
+}
+// A clause that plainly opens with "type" is dictation whatever the classifier
+// makes of the words after it: they are the person's sentence, not a request, and
+// the classifier reads "I just built an app ..." as chat (live 2026-11-20: the same
+// sentence fired on one press and went to the guide on the next). "Write" is the
+// same unless it asks for something to be composed ("write an email", "write me a
+// poem", "write the report"), which is the model's job. Never "type of ...".
+const DICTATE_TYPE = new RegExp('^' + POLITE + 'type\\b(?!\\s+of\\b)', 'i');
+const DICTATE_WRITE = new RegExp('^' + POLITE + 'write\\b', 'i');
+const WRITE_IT_DOWN = new RegExp('^' + POLITE + 'write\\s+(?:(?:this|that|these|those|it)\\s+)?(?:down|out)\\b', 'i');
+const COMPOSE = /^(?:(?:me|us|him|her|them|up|about|to|for)\b|(?:an?|the|my|our|your|some|another)\s+\S)/i;
+function plainDictation(clause) {
+  const text = String(clause || '').trim();
+  const payload = typePayload(text);
+  if (!payload) return false;
+  if (DICTATE_TYPE.test(text)) return true;
+  if (!DICTATE_WRITE.test(text)) return false;
+  // "write this down, the demo is Thursday" names its own text; "write the report" does not.
+  return WRITE_IT_DOWN.test(text) || !COMPOSE.test(payload);
+}
 const SAYS = /\b(?:say|says|saying|to say|that says|called|named)\s+(.+)$/i;
 const TRAIL = { web_search: /\s+(?:on|in|with|using) (?:google|the web|chrome|the browser)\s*$/i };
 // "search YouTube for lofi beats", "search on Amazon for a desk lamp", "look up
@@ -179,8 +253,14 @@ const tidy = (t) => String(t || '').replace(/^["'“”:,\s]+|["'“”.,!?\s]+$
 
 function slotText(ws, answers, minConf, intent, clause) {
   const text = String(clause || ws.join(' '));
-  const says = intent === 'type_text' ? SAYS.exec(text) : null;
-  if (says) return tidy(says[1]);
+  // A clause that opens "type ..." is its own text to the end: "type my app is
+  // called Nūs" types all of it, where the "called" rule below would keep "Nūs".
+  if (intent === 'type_text') {
+    const typed = typePayload(text);
+    if (typed != null) return typed;
+    const says = SAYS.exec(text);
+    if (says) return tidy(says[1]);
+  }
   const pre = PREFIX[intent] && PREFIX[intent].exec(text);
   if (pre) return tidy(text.slice(pre[0].length).replace(TRAIL[intent] || /$^/, ''));
 
@@ -206,13 +286,18 @@ const CAREFUL = new Set(['new_item', 'new_tab', 'close_tab', 'next_tab']);
 const CAREFUL_MIN = 0.7;         // the rules client gives 0.7 to a plain "new tab"; Jev's half-guesses sit lower
 const ASK_WORDS = /\b(?:how|where|why|what|teach|show me|help me|walk me|explain|insert)\b/i;
 
-function decide(clause, answers, { final, apps }) {
+function decide(clause, answers, { final, apps, keyed }) {
   const intent = answers.intent || {};
-  const name = intent.choice || 'none';
-  const conf = Number(intent.confidence || 0);
-  const out = { clause, intent: name, confidence: conf, fire: false, brain: false, final: !!final };
+  let name = intent.choice || 'none';
+  let conf = Number(intent.confidence || 0);
   // Absent in unit tests and older callers: treated as addressed.
-  const addressed = answers.addressed && typeof answers.addressed.noul === 'number' ? answers.addressed.noul : 1;
+  let addressed = answers.addressed && typeof answers.addressed.noul === 'number' ? answers.addressed.noul : 1;
+  // "Type, I just built an app": code reads the opening, so the classifier's
+  // guess about the sentence after it does not decide whether it is typed. Only
+  // for words that came through the talk key or the keyboard (keyed): the open
+  // mic hears the room, and there the classifier still has its say.
+  if (final && keyed && plainDictation(clause)) { name = 'type_text'; conf = Math.max(conf, POLICY.finalIntent); addressed = 1; }
+  const out = { clause, intent: name, confidence: conf, fire: false, brain: false, final: !!final };
   out.addressed = addressed;
   // Words meant for someone else in the room are never acted on and never sent on.
   if (final && addressed < POLICY.addressedMin) return out;
@@ -288,14 +373,21 @@ function decide(clause, answers, { final, apps }) {
   return Object.assign(out, { fire: true, label: name.replace(/_/g, ' ') });
 }
 
-async function route(clause, { final, apps, context, jev, log }) {
+async function route(clause, { final, apps, context, jev, log, keyed }) {
   const { ws, questions } = buildQuestions(clause, apps);
   if (!ws.length) return { clause, intent: 'none', confidence: 0, fire: false, brain: false, final: !!final, ms: 0 };
+  // Plain dictation through the talk key needs no classifier at all: nothing it
+  // could answer changes what is typed, and the words land that much sooner.
+  if (final && keyed && plainDictation(clause)) {
+    const d = decide(clause, { intent: { choice: 'type_text', confidence: 1 } }, { final, apps, keyed });
+    d.ms = 0; d.model = 'code';
+    return d;
+  }
   const res = await jev.systemOne({ state: { utterance: clause, context: context || {} }, questions, log });
-  const d = decide(clause, res.answers, { final, apps });
+  const d = decide(clause, res.answers, { final, apps, keyed });
   d.ms = res.ms;
   d.model = res.model;
   return d;
 }
 
-module.exports = { route, decide, splitClauses, spokenDomain, slotText, siteSearch, words, buildQuestions, INTENTS, SITES, POLICY };
+module.exports = { route, decide, splitClauses, spokenDomain, slotText, siteSearch, words, buildQuestions, typePayload, plainDictation, INTENTS, SITES, POLICY };

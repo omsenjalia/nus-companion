@@ -67,6 +67,7 @@ const { normRectFromPhys: normRect } = require('./src/guide/verify');
 const { createLedger, activityView } = require('./src/usage-ledger');
 const { createThisWeek } = require('./src/this-week');
 const { createVoice } = require('./src/voice');
+const { createParakeet } = require('./src/voice/parakeet');
 const { createTouchPad } = require('./src/touch-pad');
 // Points to physical pixels and back, on a Mac too (Electron has the calls on Windows only).
 const { createScreenPoints } = require('./src/screen-points');
@@ -1651,6 +1652,8 @@ function applySettingsPatch(patch) {
   noteSettingsSave();
   // The voice switch: the renderer must know at once whether to use it.
   if (patch && Object.prototype.hasOwnProperty.call(patch, 'voice')) { try { const st = getVoice().status(); send('voice:state', st); if (st.installed) getVoice().warm(); } catch (_) { /* no voice */ } }
+  // The speech model switch: off lets its memory go at once.
+  if (patch && Object.prototype.hasOwnProperty.call(patch, 'speechModel')) { try { getParakeet().settingChanged(); } catch (_) { /* whisper answers */ } }
   jev.configure({ apiKey: s.apiKeys && s.apiKeys.typesafe });
   if (STANDALONE) {
     const nextOpenMic = s.openMic ?? (process.env.NUS_REFLEX_OPENMIC === '1');
@@ -2455,6 +2458,18 @@ function getVoice() {
     app.on('before-quit', () => { try { if (lineCache) lineCache.cancel(); voice.close(); } catch (_) { /* best effort */ } });
   }
   return voice;
+}
+// Parakeet (src/voice/parakeet.js): the engine for finished sentences, the
+// default from 0.1.31. Creating this starts nothing; off or not installed there
+// is no worker, and Whisper answers.
+const PARAKEET_AUTO_INSTALL_MS = 45000;
+let parakeet = null;
+function getParakeet() {
+  if (!parakeet) {
+    parakeet = createParakeet({ userData: app.getPath('userData'), settings: { get: () => store.getSettings() }, log: (m) => console.log('[parakeet] ' + m), onState: (s) => { if (hooks.onSpeechState) { try { hooks.onSpeechState(s); } catch (_) { /* host gone */ } } } });
+    app.on('before-quit', () => { try { parakeet.close(); } catch (_) { /* best effort */ } });
+  }
+  return parakeet;
 }
 // The Knot's short lines, made once with its voice (src/voice/lines.js) and
 // kept in the voice folder. The key names the voice that made them.
@@ -3558,14 +3573,21 @@ function getListener() {
         routeUtterance(text, 'voice', meta.heardAt, meta.seg);
         return true;
       },
-      onPartial: (text, meta) => { showHeard(text); if (ptt.heldText || heardBack(text) || selection || assignment?.isOn() || classifyAsk(text, false)) return; if (parseRecallAsk(text)) { warmRecallBrain(); return; } earlyGuideRead(text, 'voice'); if (!state.busy && !ownPath(text) && !handsClaims(text) && !handsFollowUp(text) && !(agent && agent.active())) getReflex().handle(text, { final: false, uttId: meta && meta.seg }).catch(() => {}); },
+      onPartial: (text, meta) => { showHeard(text); if (ptt.heldText || heardBack(text) || selection || assignment?.isOn() || classifyAsk(text, false)) return; if (parseRecallAsk(text)) { warmRecallBrain(); return; } earlyGuideRead(text, 'voice'); if (!state.busy && !ownPath(text) && !handsClaims(text) && !handsFollowUp(text) && !(agent && agent.active())) getReflex().handle(text, { final: false, uttId: meta && meta.seg, keyed: !OPEN_MIC }).catch(() => {}); },
       // Names whisper should know: the product, and the people and courses in memory.
       vocabulary: () => whisperVocabulary(),
+      // The optional engine for finished sentences; nothing changes until it is on and loaded.
+      finalEngine: getParakeet(),
       onFinal: joinFinal
     });
   }
   return listener;
 }
+// Which asks get the whole press heard again with care before they go out
+// (hearWholePress, below): the ones whose words are kept (typed, saved as a
+// note, searched for). A command stays on the fast words. Never from the open
+// room mic, whose press runs for minutes. NUS_WHOLE_PRESS=0 turns it off.
+function wholePressWanted(text) { return process.env.NUS_WHOLE_PRESS !== '0' && !OPEN_MIC && carriesText(text); }
 // A pause ends a segment, not necessarily the sentence. A note, a typed line or
 // a search that opened in this segment carries its words, so it waits: the next
 // segment of the same press is joined onto it, and the key coming up routes
@@ -3581,9 +3603,18 @@ function joinFinal(text, meta) {
   const held = ptt.heldText;
   const joined = held ? held.text + ' ' + text : text;
   const heardAt = (held && held.heardAt) || (meta && meta.heardAt);
-  if (reason !== 'flush' && ptt.held && (carriesText(joined, { hands: handsOn() }) || handsFollowUp(joined))) { ptt.heldText = { text: joined, heardAt, seg: meta && meta.seg }; return; }
+  const press = held && held.press != null ? held.press : ptt.press;
+  // ptt.flushing: the key has just come up and the last words of this press are
+  // still being transcribed behind this final. They are the rest of the same
+  // sentence (live 2026-11-20: "Type in, I just built an app." went out alone,
+  // then "That lets you type in the speed of light." went out as a second ask).
+  if (reason !== 'flush' && (ptt.held || ptt.flushing) && (carriesText(joined, { hands: handsOn() }) || handsFollowUp(joined))) { ptt.heldText = { text: joined, heardAt, seg: meta && meta.seg, press }; return; }
+  // The key is up and these are the last words of the press. A typed line, a
+  // note or a search waits a moment more: pttStop hears the whole press again
+  // in one piece before it goes out (hearWholePress).
+  if (reason === 'flush' && ptt.flushing && wholePressWanted(joined)) { ptt.heldText = { text: joined, heardAt, seg: meta && meta.seg, press }; return; }
   if (endsMidPhrase(joined, { keyUp: reason === 'flush' })) {
-    ptt.heldText = { text: joined, heardAt, seg: meta && meta.seg };
+    ptt.heldText = { text: joined, heardAt, seg: meta && meta.seg, press };
     ptt.midTimer = setTimeout(routeHeldText, MID_PHRASE_MS);
     return;
   }
@@ -3596,6 +3627,26 @@ function routeHeldText() {
   const h = ptt.heldText;
   ptt.heldText = null;
   if (h) routeUtterance(waited ? trimCutOff(h.text) : h.text, 'voice', h.heardAt, h.seg);
+}
+// The whole press, heard once more in one piece and with care, for words that
+// will be typed, saved or searched (src/reflex/listen.js whole; the decode is
+// OpenWhispr's). Live 2026-11-20 the fast pass, which cuts at every pause and
+// takes the decoder's first guess, wrote "I just build a nap" and put a full
+// stop at each breath. About 1.2 s more, after the key is up. The careful words
+// are kept only if they are still the same kind of ask: "Type hello" heard
+// again as "Tai hello" would not be typed at all.
+async function hearWholePress(pcm, press) {
+  const h = ptt.heldText;
+  if (!h || ptt.midTimer || h.press !== press || !wholePressWanted(h.text)) return;
+  ptt.heldText = null;   // ours until it is routed: a new press starting meanwhile cannot drop it
+  let text = h.text;
+  const t0 = Date.now();
+  let better = '';
+  try { better = await getListener().whole(pcm); } catch (e) { console.log('[listen] ' + e.message); }
+  if (better && better !== text && wholePressWanted(better)) { routeLog('whole press heard again in ' + (Date.now() - t0) + 'ms: "' + better.slice(0, 120) + '" (in pieces: "' + text.slice(0, 120) + '")'); text = better; }
+  else routeLog('whole press ' + (!better ? 'gave no answer' : better === text ? 'heard the same' : 'not kept: "' + better.slice(0, 80) + '"') + ' in ' + (Date.now() - t0) + 'ms');
+  if (!ptt.heldText && endsMidPhrase(text, { keyUp: true })) { ptt.heldText = { text, heardAt: h.heardAt, seg: h.seg, press: h.press }; ptt.midTimer = setTimeout(routeHeldText, MID_PHRASE_MS); return; }
+  routeUtterance(text, 'voice', h.heardAt, h.seg);
 }
 // The key came up with words still held. A sentence stopped mid-phrase gets the
 // same breath as any other (live 2026-11-03: "Open Instagram on..." was held as a
@@ -3749,6 +3800,8 @@ function pttStart() {
   warmGuideBrain();
   // The resident whisper (src/whisper-server.js) loads while the person talks.
   try { require('../src/stt-local').warm(); } catch (_) { /* whisper-cli carries on */ }
+  // So does Parakeet, when it is switched on and installed; whisper covers until it is up.
+  try { getParakeet().warm(); } catch (_) { /* whisper answers */ }
   if (ptt.streaming) getListener().reset();
   send('ptt:state', { held: true });
   send('guide:state', { state: 'listening', task: 'guide' });
@@ -3781,6 +3834,7 @@ async function pttStop(reason) {
   stopMacReleaseWatch();
   if (!ptt.held) return;
   const keyUpAt = Date.now();
+  const press = ptt.press;
   ptt.held = false;
   clearTimeout(ptt.timer);
   ptt.timer = null;
@@ -3811,7 +3865,9 @@ async function pttStop(reason) {
     // the last words onto it, or routes it as it stands.
     ptt.streaming = false;
     sayNeutral(heardText(ptt.lastPartial), keyUpAt);
-    try { await getListener().flush(); } catch (e) { console.log('[listen] ' + e.message); }
+    ptt.flushing = true;
+    try { await getListener().flush(); } catch (e) { console.log('[listen] ' + e.message); } finally { ptt.flushing = false; }
+    await hearWholePress(pcm, press);
     routeHeldOnRelease();
     if (!ptt.finals) { flash(PTT_MISSED, 3000); restoreKnotState(); }
     else if (!(guide && guide.active())) restoreKnotState();
@@ -4464,7 +4520,7 @@ async function routeUtterance(text, source, heard, uttId, assignmentAlreadyCheck
     let fgBefore = null;
     if (launchesThenAsks(text)) { try { fgBefore = await getGuide().foreground(); } catch (_) { fgBefore = null; } }
     reflexTurn = { source, heardAt };
-    try { out = await r.handle(text, { final: true, heardAt, uttId }); } catch (e) { console.log('[reflex] ' + e.message); }
+    try { out = await r.handle(text, { final: true, heardAt, uttId, keyed: !openMicSource(source) }); } catch (e) { console.log('[reflex] ' + e.message); }
     reflexTurn = null;
     routeLog('reflex: ' + (out ? 'fired ' + (out.fired || 0) + (out.brainText ? ', rest "' + out.brainText.slice(0, 80) + '"' : '') + (out.down ? ', down' : '') : 'no answer') + ' for "' + text.slice(0, 80) + '"');
     if (out && out.fired && out.brainText && launchesThenAsks(text)) { const fg = await awaitNewWindow(fgBefore, 8000, (launchClause(text) || {}).app || ''); routeLog('waited for the opened window: ' + (fg ? '"' + String(fg.title || '').slice(0, 40) + '" (' + (fg.process || '') + ')' : 'none came in 8 s')); }
@@ -5349,6 +5405,10 @@ function initCompanion(providedHooks = {}) {
   // Companion the user turned off stays off across launches until they turn it
   // back on from the desktop Knot pane.
   registerIpc();
+  // Parakeet is the default speech engine: fetch it in the background a little
+  // after start. Whisper answers until it is in. Skipped when the person turned
+  // it off in Settings (speechModel 'whisper') or NUS_PARAKEET=0.
+  { const t = setTimeout(() => { getParakeet().autoInstall().catch(() => {}); }, PARAKEET_AUTO_INSTALL_MS); if (t.unref) t.unref(); }
   if (settings.companionEnabled !== false) {
     createOverlayWindow();
     registerShortcuts();
@@ -5439,6 +5499,10 @@ function initCompanion(providedHooks = {}) {
     voiceStatus: () => getVoice().status(),
     voiceInstall: (name) => getVoice().install(name).then((st) => { if (st && st.installed) prerenderLines('install'); return st; }),
     voiceWarm: () => getVoice().warm(),
+    // Parakeet: where it stands, and the one-time download. The switch turns on
+    // when the download lands, even if the dashboard was closed in the meantime.
+    speechStatus: () => getParakeet().status(),
+    speechInstall: () => getParakeet().install().then((st) => { if (st.installed) applySettingsPatch({ speechModel: 'parakeet' }); return getParakeet().status(); }),
     // Get started: arm the talk key try, and send the first real ask as if it
     // were typed to the Knot (the same route a spoken one takes).
     ask: (text) => { forceShow(); routeUtterance(String(text || '').slice(0, 500), 'typed').catch((e) => console.log('[companion] ask failed: ' + e.message)); return companionStatus(); },

@@ -243,4 +243,25 @@ function createClaudePool({ cliPath, cwd, env, log = () => {}, spawn = nodeSpawn
   return { warm, run, close, status, argv, userMessage, LOCKED_ARGS };
 }
 
-module.exports = { createClaudePool, createParser, userMessage, classifyError, LOCKED_ARGS };
+// Which of `where.exe claude`'s lines can be started on Windows. An npm install of Claude Code puts
+// three files side by side: `claude` (a shell script for Git Bash), `claude.cmd` and `claude.ps1`,
+// and where.exe lists the one with no extension first. Until 0.1.31 that first line was taken as it
+// was: Settings said Claude Code was connected, and every ask failed with "spawn ...\npm\claude
+// ENOENT" (two error notes and one "it says its connected claude code but its not responding" on
+// 2026-11-21; reproduced the same day). Order: a real program, then a .cmd or .bat (run through
+// cmd.exe by the callers), then the .cmd that sits beside a bare `claude`, then the first line.
+function pickWindowsCli(lines, exists = fs.existsSync) {
+  const list = (Array.isArray(lines) ? lines : String(lines || '').split(/\r?\n/)).map((line) => String(line || '').trim()).filter(Boolean);
+  if (!list.length) return null;
+  const exe = list.find((line) => /\.exe$/i.test(line));
+  if (exe) return exe;
+  const shim = list.find((line) => /\.(cmd|bat)$/i.test(line));
+  if (shim) return shim;
+  for (const line of list) {
+    if (path.extname(line)) continue;
+    for (const ext of ['.exe', '.cmd', '.bat']) { try { if (exists(line + ext)) return line + ext; } catch (_) { /* next */ } }
+  }
+  return list[0];
+}
+
+module.exports = { createClaudePool, createParser, userMessage, classifyError, LOCKED_ARGS, pickWindowsCli };
