@@ -15,7 +15,7 @@ module.exports = {
   appId: 'com.nus.companion',
   productName: 'Nus Companion',
   copyright: base.copyright,
-  extraMetadata: { name: 'nus-companion', version: '0.1.32', main: 'src/main-companion.js', publik: PUBLIK,
+  extraMetadata: { name: 'nus-companion', version: '0.1.33', main: 'src/main-companion.js', publik: PUBLIK,
     description: 'Nūs Companion: the Knot that hears you and acts, on its own.' },
   directories: { output: 'dist-companion', buildResources: 'build' },
   // companion/** carries companion/src/stats.js (anonymous usage stats, plain
@@ -81,6 +81,9 @@ module.exports = {
       // Fable, the Knot's own voice (Kokoro v1.0 via sherpa-onnx, Apache-2.0; espeak-ng-data is
       // GPL-3.0, see THIRD-PARTY.md), so the first word is Fable with no download. The English files only.
       { from: 'vendor/voice/kokoro-multi-lang-v1_0', to: 'voice/kokoro-multi-lang-v1_0', filter: ['model.onnx', 'voices.bin', 'tokens.txt', 'lexicon-gb-en.txt', 'lexicon-us-en.txt', 'LICENSE', 'espeak-ng-data/**'] },
+      // The Knot's fixed lines in Fable, made at build time (scripts/make-voice-lines.js, which
+      // dist:companion runs first), so a new install makes none of them on its own processor.
+      { from: 'vendor/voice-lines', to: 'voice-lines', filter: ['*.wav', 'lines.json'] },
       { from: 'vendor/whisper-models', to: 'whisper-models', filter: ['ggml-base.en-q5_1.bin'] },
       // all-MiniLM-L6-v2, int8 ONNX (Apache-2.0): search by meaning. npm run setup:embed fetches it.
       { from: 'vendor/embed-models', to: 'embed-models', filter: ['all-MiniLM-L6-v2/model_quantized.onnx', 'all-MiniLM-L6-v2/vocab.txt'] }],

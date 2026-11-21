@@ -77,6 +77,7 @@ function screenPoints() { if (!screenPointsCache) screenPointsCache = createScre
 const { createOverlayMouse, mouseNoteLine } = require('./src/overlay-mouse');
 const { overlayArea } = require('./src/overlay-area');
 const { ACKS, NEUTRAL_ACK, LINES, ackForIntent, heardBack, smallTalk, createLineCache } = require('./src/voice/lines');
+const { shippedLinesDir, voiceKeyOf } = require('./src/voice/lines');
 const { MOD_VKS, modifierChord, createChordTracker } = require('./src/voice/ptt-chord');
 const { macChordMods, watchChordRelease } = require('./src/voice/mac-release');
 // The Mac's words for what this process sends and what the model reads (renderer/mac-words.js).
@@ -2480,8 +2481,11 @@ function getLines() {
   if (!lineCache) {
     lineCache = createLineCache({
       dir: path.join(app.getPath('userData'), 'voice', 'lines'),
+      // The fixed lines come with the app, made when it was built (0.1.33): nothing to make at
+      // a first start for the voice Nūs ships with.
+      shipped: shippedLinesDir(),
       voiceKey: () => {
-        try { const st = getVoice().status(); const v = getVoice().VOICES[st.voice]; return st.installed && v ? [st.voice, v.model, v.speaker, v.speed].join(':') : ''; } catch (_) { return ''; }
+        try { const st = getVoice().status(); const v = getVoice().VOICES[st.voice]; return st.installed && v ? voiceKeyOf(st.voice, v) : ''; } catch (_) { return ''; }
       },
       synth: (line) => getVoice().synth(line),
       // Live speech first, and no decode competing with whisper while the key is down.

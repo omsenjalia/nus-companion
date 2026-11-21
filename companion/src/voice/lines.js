@@ -113,13 +113,28 @@ const MAX_STOPS = 5;
 const QUIET_POLL_MS = 150;
 
 // quiet(): nothing live needs the voice or the CPU right now (making waits for it).
-function createLineCache({ dir, voiceKey, synth, log = () => {}, keep = (line) => LINES.includes(line), quiet = () => true, sleep = (ms) => new Promise((r) => setTimeout(r, ms)) }) {
+// shipped: a folder of lines made when the app was built (scripts/make-voice-lines.js, 0.1.33),
+// named exactly as this cache names them, so a line for the same voice is found there and is
+// never made on the person's computer. Measured 2026-11-21 on a new profile: making the 49 fixed
+// lines kept the voice worker at about 3.7 processor cores from roughly 50 to 80 s after the
+// first start, while a new person was on the tour and asking their first questions. A line that
+// is not shipped (another voice, the greeting with a name, a line added later) is made as before.
+function createLineCache({ dir, shipped, voiceKey, synth, log = () => {}, keep = (line) => LINES.includes(line), quiet = () => true, sleep = (ms) => new Promise((r) => setTimeout(r, ms)) }) {
   const mem = new Map();          // key -> { sampleRate, pcm, secs }
   let rendering = null;
   let queue = [];
   const asked = new Set();
   const key = (line) => voiceKey() + '\n' + line;
   function file(line) { return path.join(dir, fileName(voiceKey(), line)); }
+  // The shipped folder is listed once: has() is asked for every line at start and on every tour
+  // card and must not touch the disk each time (see has below).
+  let shippedNames = null;
+  function shippedFile(line) {
+    if (!shipped) return null;
+    if (!shippedNames) { try { shippedNames = new Set(fs.readdirSync(shipped)); } catch (_) { shippedNames = new Set(); } }
+    const name = fileName(voiceKey(), line);
+    return shippedNames.has(name) ? path.join(shipped, name) : null;
+  }
 
   // A line already made -> its audio, else null. Never synthesizes.
   function get(line) {
@@ -131,6 +146,14 @@ function createLineCache({ dir, voiceKey, synth, log = () => {}, keep = (line) =
       const a = readWav(fs.readFileSync(file(line)));
       if (a) { mem.set(key(line), a); return a; }
     } catch (_) { /* not made yet */ }
+    const sf = shippedFile(line);
+    if (sf) {
+      try {
+        const a = readWav(fs.readFileSync(sf));
+        if (a) { mem.set(key(line), a); return a; }
+      } catch (_) { /* unreadable: made here instead */ }
+      shippedNames.delete(path.basename(sf));   // a broken shipped file is not offered again
+    }
     return null;
   }
   // Keep a line just made, if it is one worth keeping.
@@ -152,6 +175,7 @@ function createLineCache({ dir, voiceKey, synth, log = () => {}, keep = (line) =
     const k = voiceKey();
     if (!k || !line) return false;
     if (mem.has(key(line))) return true;
+    if (shippedFile(line)) return true;         // made at build time: one set lookup, no disk
     try { return fs.statSync(file(line)).size > 44; } catch (_) { return false; }
   }
   function missing(lines = LINES) { return lines.filter((l) => !has(l)); }
@@ -195,4 +219,19 @@ function createLineCache({ dir, voiceKey, synth, log = () => {}, keep = (line) =
   return { get, put, has, missing, prerender, cancel, file };
 }
 
-module.exports = { ACKS, NEUTRAL_ACK, SMALL_TALK_LINES, LINES, ackForIntent, heardBack, smallTalk, createLineCache, readWav, fileName };
+// Where the lines made at build time sit: resources/voice-lines in the installed app
+// (electron-builder.companion.config.js copies vendor/voice-lines there), vendor/voice-lines in a
+// run from source. The first folder that exists, or '' when there is none.
+function shippedLinesDir(resourcesPath = process.resourcesPath, exists = fs.existsSync) {
+  const roots = [];
+  if (resourcesPath) roots.push(path.join(resourcesPath, 'voice-lines'));
+  roots.push(path.join(__dirname, '..', '..', '..', 'vendor', 'voice-lines'));
+  for (const r of roots) { try { if (exists(r)) return r; } catch (_) { /* next */ } }
+  return '';
+}
+
+// The name of the voice that made a line, as the cache keys it. One place, so the build script
+// and the app cannot drift apart: a different key means the shipped files are never found.
+function voiceKeyOf(voiceName, v) { return v ? [voiceName, v.model, v.speaker, v.speed].join(':') : ''; }
+
+module.exports = { ACKS, NEUTRAL_ACK, SMALL_TALK_LINES, LINES, ackForIntent, heardBack, smallTalk, createLineCache, readWav, fileName, shippedLinesDir, voiceKeyOf };

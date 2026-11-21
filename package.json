@@ -1,6 +1,6 @@
 {
   "name": "nus-companion",
-  "version": "0.1.32",
+  "version": "0.1.33",
   "description": "Nūs Companion: ask about your screen by voice or text. The Knot points, guides and can act.",
   "main": "src/main-companion.js",
   "private": true,
@@ -12,7 +12,8 @@
     "setup:embed": "node scripts/setup-embed.js",
     "start:companion": "electron src/main-companion.js",
     "smoke:companion": "electron src/main-companion.js --smoke",
-    "dist:companion": "electron-builder --win --config electron-builder.companion.config.js --publish never",
+    "voice:lines": "node scripts/make-voice-lines.js",
+    "dist:companion": "node scripts/make-voice-lines.js && electron-builder --win --config electron-builder.companion.config.js --publish never",
     "dist:check:companion": "node scripts/package-security-check.js --profile=companion",
     "dist:companion:mac": "electron-builder --mac --config electron-builder.companion.config.js --publish never"
   },
