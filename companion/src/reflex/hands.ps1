@@ -348,6 +348,12 @@ function Handle($req) {
           } elseif ($verified -eq $false -and $null -ne $before -and $v -ne $before) {
             # The box changed, so the paste went in where the read cannot see it.
             $how = 'paste'
+          } elseif ($verified -eq $false -and $req.retype -eq $false) {
+            # Dictation (0.1.37) asks for no retype. Firefox reports its address
+            # bar as the focused field while the caret is in a page's text box, so
+            # the read cannot see a paste that did land, and typing it again put
+            # every sentence in twice (tried 2026-11-23). The paste stands, unconfirmed.
+            $how = 'paste'
           } elseif ($verified -eq $false) {
             # The paste did not land (a box that rejects paste): type it instead.
             $how = 'sendkeys'

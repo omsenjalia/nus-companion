@@ -150,5 +150,5 @@ test('the build config and publik\'s module carry the same release version', () 
   const mod = /const APP_VERSION = "(\d+\.\d+\.\d+)";/.exec(read('companion/src/publik/publik.js'));
   assert.ok(build && mod, 'both name a version');
   assert.equal(mod[1], build[1]);
-  assert.equal(build[1], '0.1.36');
+  assert.equal(build[1], '0.1.37');
 });

@@ -237,6 +237,23 @@ function card(step, info = {}) {
   return Object.assign(base, { kind: 'done', title, body: 'Hold these keys any time, in any app, and ask. Or pick one and I will do it right now.', spoken: title + ' Hold these keys any time and ask. Or pick one, and I will do it now.', keys: keycaps(caps.ptt, caps.mac), status: '', actions });
 }
 
+// The dictation card (0.1.37 test, half of installs): right after the talk key's
+// card, kept on its step number so the dots and "of 10" do not move. The
+// practice line goes into the person's own app (the Notepad the hello typed
+// into, or any text box), never into a Nūs window.
+const DICTATE_PRACTICE = 'This is my first note with Nūs.';
+const DICTATE_DONE_LINE = 'That is dictation. Ctrl and Win type for you in any app, any time.';
+const DICTATE_MISSED_LINE = 'Click into a text box first, like Notepad, then hold Ctrl and Win again.';
+function dictateCard(info = {}) {
+  const caps = info.caps || {};
+  // Only a tour that started from the hello, which typed into Notepad, says "the Notepad I opened".
+  const where = caps.helloTyped === true ? 'like the Notepad I opened' : 'like Notepad or a search box';
+  return { step: STEP.key, of: OF, skip: true, note: '', progress: null, kind: 'dictate', title: 'I can type for you too', keys: ['Ctrl', 'Win'],
+    body: 'Click into any text box, ' + where + '. Hold Ctrl and Win, say the line, let go. It types itself in. It runs on this computer and works offline.',
+    spoken: 'I can type for you too. Hold Control and Windows, and say the line.',
+    chip: 'Say: "' + DICTATE_PRACTICE + '"', status: 'Waiting for you', actions: continueActions(true) };
+}
+
 // The one line the tuck shows while a demo has the screen.
 function tuckLine(step, text) { return 'Step ' + step + ' of ' + OF + '. ' + text; }
 
@@ -258,10 +275,12 @@ function cachedLines(mac = process.platform === 'darwin') {
   const caps = Object.assign({ whisper: true, source: true, cli: false, keyReady: false, hands: true, english: true, voice: { installed: true } }, mac ? { mac: true, macTyped: false, hands: false } : {});
   const lines = new Set(spokenLines(caps).filter((l) => !/Maya/.test(l)));
   lines.add(HELLO_LINE); lines.add(HELLO_UNTYPED_LINE);
+  if (!mac) { lines.add(dictateCard({ caps }).spoken); lines.add(DICTATE_DONE_LINE); }
   const extras = mac ? [{ source: false }, { cli: true }, { keyReady: true }, { publik: true }, { macTyped: true, whisper: false }] : [{ source: false }, { cli: true }, { keyReady: true }, { publik: true }, { hands: false }, { whisper: false }];
   for (const extra of extras) for (let s = 1; s <= OF; s++) { const c = Object.assign({}, caps, extra); if (!skipStep(s, c)) lines.add(card(s, { caps: c }).spoken); }
   return [...lines].filter(Boolean);
 }
 
 module.exports = { HELLO_LINE, HELLO_UNTYPED_LINE, HELLO_ACTIONS, STEP, OF, QUESTIONS, HANDS_LINES, TRY_CHIPS, FIRST_WINS, firstWins, GUIDE_DEMO_LINE, guideChip, HANDS_CARD, HANDS_DONE_LINE, HANDS_UNSURE_LINE, NOT_ENGLISH_LINE, VOICE_MB, VOICE_LANDED_LINE, VOICE_FAILED_LINE, DASHBOARD_STOPS, DASHBOARD_DONE_LINE, DASHBOARD_TUCK, DASHBOARD_FAILED_LINE, HOME_CHANGED_LINE, KEY_OK_LINE, KEY_BAD_LINE, KEY_FAILED_LINE,
-  shouldShow, onFirstWindow, englishLocale, nameFrom, typedName, hearFor, UNSTICK_MS, stuck, unstuck, keyCheck, keycaps, skipStep, continueActions, qaRows, homeChoices, sharingToggle, progressOf, card, tuckLine, spokenLines, cachedLines };
+  shouldShow, onFirstWindow, englishLocale, nameFrom, typedName, hearFor, UNSTICK_MS, stuck, unstuck, keyCheck, keycaps, skipStep, continueActions, qaRows, homeChoices, sharingToggle, progressOf, card, tuckLine, spokenLines, cachedLines,
+  DICTATE_PRACTICE, DICTATE_DONE_LINE, DICTATE_MISSED_LINE, dictateCard };

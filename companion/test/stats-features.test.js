@@ -23,7 +23,8 @@ function rig(opts = {}) {
 
 test('the fixed lists are the contract lists', () => {
   assert.deepEqual(FEATURES.slice(0, 9), ['reflex', 'hands', 'memory', 'focus_guard', 'reminder', 'guide', 'plan', 'chat', 'voice']);
-  assert.deepEqual(FEATURES.slice(9), ['greeting', 'rewrite', 'page_read', 'recall', 'project'], 'amendment (e) additions');
+  assert.deepEqual(FEATURES.slice(9, 14), ['greeting', 'rewrite', 'page_read', 'recall', 'project'], 'amendment (e) additions');
+  assert.deepEqual(FEATURES.slice(14), ['dictation'], '0.1.37: dictation, its own name (seventh edition on the server)');
   assert.deepEqual(OUTCOMES, ['ok', 'failed', 'no_provider', 'cancelled', 'timeout']);
   assert.deepEqual(STEPS.slice(0, 6), ['welcome_seen', 'stats_notice_seen', 'key_prompt_seen', 'key_skipped', 'key_connected', 'first_window_closed']);
   assert.ok(STEPS.includes('tour_done') && STEPS.includes('struggle_picked') && STEPS.includes('autostart_on'), 'amendment (e) additions');

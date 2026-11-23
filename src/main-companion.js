@@ -259,7 +259,9 @@ function openHome() {
 function publicSettings() {
   const s = store.getSettings();
   const { apiKeys, ...rest } = s;
-  return { ...rest, keys: Object.fromEntries(Object.entries(apiKeys || {}).map(([k,v]) => [k, !!v])), openMic: s.openMic ?? (process.env.NUS_REFLEX_OPENMIC === '1') };
+  let dictation = { on: false, why: '', keys: 'Ctrl + Win' };
+  try { if (companion && companion.dictation) dictation = companion.dictation(); } catch (_) { /* the switch shows off */ }
+  return { ...rest, keys: Object.fromEntries(Object.entries(apiKeys || {}).map(([k,v]) => [k, !!v])), openMic: s.openMic ?? (process.env.NUS_REFLEX_OPENMIC === '1'), _dictation: dictation };
 }
 // One key store. The Companion's settings (companion/src/store.js, encrypted)
 // hold every key; the desktop-side Claude client (src/ai.js, shared with the
@@ -303,6 +305,8 @@ function settingsPatch(patch) {
   for (const key of ['openMic', 'persistTranscripts', 'saveAudio', 'speakReplies', 'smart', 'proactive', 'hideFromCapture', 'sounds', 'focusGuard', 'tasks', 'hands', 'knotIsland']) if (typeof patch[key] === 'boolean') clean[key] = patch[key];
   if (typeof patch.channelMessages === 'boolean') clean.channelMessages = patch.channelMessages;
   if (typeof patch.startWithWindows === 'boolean') clean.startWithWindows = patch.startWithWindows;
+  // Dictation (Ctrl + Win): set here, it wins over the install's half of the 0.1.37 test.
+  if (typeof patch.dictation === 'boolean') clean.dictation = patch.dictation;
   // The feed titles the focus guard closes: short words, at most 20, deduplicated.
   if (Array.isArray(patch.focusGuardFeeds) || typeof patch.focusGuardFeeds === 'string') clean.focusGuardFeeds = normalizeFeeds(patch.focusGuardFeeds);
   // The Knot's voice: the system one, or a named local voice (companion/src/voice).
@@ -637,6 +641,10 @@ app.whenReady().then(async () => {
     // the person actually used Nus (not just left it running).
     onWin: feature => stats.win(feature),
     onEngaged: () => stats.engaged(),
+    // Dictation (0.1.37): its own feature name, never a first ask or a first win,
+    // and the install id that picks which half of the test this install is in.
+    onDictation: outcome => stats.dictation(outcome),
+    installId: () => stats.installId(),
     onAiReady: p => stats.aiReady(p),
     // 0.1.22: the error bubble's "Switch to publik" (the person's own key stopped answering).
     publikSwitch: () => {

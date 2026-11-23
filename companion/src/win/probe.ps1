@@ -50,6 +50,21 @@ public static class NusWin {
   [StructLayout(LayoutKind.Sequential)] public struct POINT { public int X; public int Y; }
   [StructLayout(LayoutKind.Sequential)] public struct RECT { public int L; public int T; public int R; public int B; }
   public static string ClassOf(IntPtr h) { var sb = new StringBuilder(256); GetClassNameW(h, sb, 256); return sb.ToString(); }
+  [StructLayout(LayoutKind.Sequential)] public struct GUITHREADINFO { public int cbSize; public uint flags; public IntPtr hwndActive; public IntPtr hwndFocus; public IntPtr hwndCapture; public IntPtr hwndMenuOwner; public IntPtr hwndMoveSize; public IntPtr hwndCaret; public RECT rcCaret; }
+  [DllImport("user32.dll")] public static extern bool GetGUIThreadInfo(uint idThread, ref GUITHREADINFO g);
+  // The window's own answer about typing: { the caret's window, the focused child }, 0 for none.
+  public static long[] Focus(IntPtr h) {
+    uint pid; uint tid = GetWindowThreadProcessId(h, out pid);
+    var g = new GUITHREADINFO(); g.cbSize = Marshal.SizeOf(typeof(GUITHREADINFO));
+    if (tid == 0 || !GetGUIThreadInfo(tid, ref g)) return new long[] { 0, 0 };
+    return new long[] { g.hwndCaret.ToInt64(), g.hwndFocus.ToInt64() };
+  }
+  // The caret a browser or an Electron app draws itself is not a Windows caret;
+  // those apps report it through the accessibility caret object instead (OBJID_CARET).
+  [DllImport("oleacc.dll")] public static extern int AccessibleObjectFromWindow(IntPtr hwnd, uint id, ref Guid iid, [MarshalAs(UnmanagedType.IDispatch)] out object acc);
+  public static object CaretObject(IntPtr h) {
+    try { Guid iid = new Guid("00020400-0000-0000-C000-000000000046"); object o; if (AccessibleObjectFromWindow(h, 0xFFFFFFF8, ref iid, out o) != 0) return null; return o; } catch { return null; }
+  }
   // The ordinary windows drawn over `target`: above it in the z-order, shown,
   // not minimised, not cloaked (another desktop, a suspended app), not topmost
   // themselves, and overlapping it. Returns { how many, the first one's
@@ -518,6 +533,46 @@ function Handle($req) {
         $pw = $false; try { $pw = [bool]$f.Current.IsPassword } catch {}
         return @{ element=@{ name=$d.name; type=$d.type; rect=$d.rect; isPassword=$pw; pid=$d.pid } }
       } catch { return @{ element=$null; error=[string]$_.Exception.Message } }
+    }
+    'focus.text' {
+      # Can words be typed where the keyboard focus is? Facts only, read-only,
+      # no value is ever read: the window's class, whether it shows a caret,
+      # and what the focused control says about itself. src/dictate.js
+      # (focusTakesText) decides; dictation asks this as Ctrl + Win goes down.
+      $sw = [System.Diagnostics.Stopwatch]::StartNew()
+      $ignore = if ($req.ignorePid) { [uint32]$req.ignorePid } else { [uint32]0 }
+      $h = [NusWin]::GetForegroundWindow()
+      $out = @{ hwnd=[int64]$h; cls=''; pid=0; ours=$false; caret=$false; focusCls=''; type=''; password=$false; hasValue=$false; readOnly=$null; hasText=$false; textReadOnly=$null }
+      if ($h -ne [IntPtr]::Zero) {
+        $out.cls = [NusWin]::ClassOf($h); $out.pid = [int][NusWin]::Pid($h)
+        if ($ignore -ne 0 -and [uint32]$out.pid -eq $ignore) { $out.ours = $true }
+        else {
+          $hf = $h
+          try { $g = [NusWin]::Focus($h); $out.caret = ($g[0] -ne 0); if ($g[1] -ne 0) { $hf = [IntPtr]$g[1]; $out.focusCls = [NusWin]::ClassOf($hf) } } catch {}
+          if (-not $out.caret) {
+            try {
+              $c = [NusWin]::CaretObject($hf)
+              if ($c) { $cx = 0; $cy = 0; $cw = 0; $ch = 0; $c.accLocation([ref]$cx, [ref]$cy, [ref]$cw, [ref]$ch, 0); if ($ch -gt 0) { $out.caret = $true; $out.caretVia = 'acc' } }
+            } catch {}
+          }
+          try {
+            $f = $AE::FocusedElement
+            if ($f) {
+              $out.type = Type-Name $f $false
+              try { $out.password = [bool]$f.Current.IsPassword } catch {}
+              $vp = $null
+              if ($f.TryGetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern, [ref]$vp)) { $out.hasValue = $true; try { $out.readOnly = [bool]$vp.Current.IsReadOnly } catch {} }
+              $tp = $null
+              if ($f.TryGetCurrentPattern([System.Windows.Automation.TextPattern]::Pattern, [ref]$tp)) {
+                $out.hasText = $true
+                try { $ro = $tp.DocumentRange.GetAttributeValue([System.Windows.Automation.TextPattern]::IsReadOnlyAttribute); if ($ro -is [bool]) { $out.textReadOnly = [bool]$ro } } catch {}
+              }
+            }
+          } catch { $out.error = [string]$_.Exception.Message }
+        }
+      }
+      $out.ms = [int]$sw.ElapsedMilliseconds
+      return $out
     }
     'uia.text' {
       $hwnd = if ($req.hwnd) { [int64]$req.hwnd } else { [int64][NusWin]::GetForegroundWindow() }

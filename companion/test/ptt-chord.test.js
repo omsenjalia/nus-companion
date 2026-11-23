@@ -101,12 +101,16 @@ test('the Companion makes Ctrl+Alt the default, keeps the old chord as a choice,
   assert.match(main, /const LEGACY_PTT_SHORTCUT = 'CommandOrControl\+Alt\+Space';/);
   const reg = main.slice(main.indexOf('function registerPttShortcut()'), main.indexOf('// -------- guide harness'));
   assert.match(reg, /modifierChord\(wanted\)/, 'a modifier chord takes the probe path');
-  assert.match(reg, /probe\.setBase\(MOD_VKS\)/, 'the modifiers are watched for as long as the probe runs');
+  // 0.1.37: the watch list is set in one place, applyProbeBase, which adds the Win keys only
+  // when dictation is on (companion/test/dictate.test.js checks that it asks for MOD_VKS otherwise).
+  assert.match(reg, /ptt\.chord = createChordTracker\(wanted\);\n\s+applyProbeBase\(\);/, 'the modifiers are watched for as long as the probe runs');
+  assert.match(main, /probe\.setBase\(on \? MOD_VKS\.concat\(Dictate\.WIN_VKS\) : MOD_VKS\)/);
   assert.match(reg, /ptt\.chord = createChordTracker\(/);
   assert.match(reg, /LEGACY_PTT_SHORTCUT/, 'without the probe the old hotkey is registered instead');
   const keys = main.slice(main.indexOf("probe.on('key', (e) => {"), main.indexOf("probe.on('fg'"));
   assert.match(keys, /const r = ptt\.chord\.onKey\(vk, !!e\.down\)/);
-  assert.match(keys, /if \(r === 'down'\) pttStart\(\);/);
+  // 0.1.37: the talk key does not start while a dictation (Ctrl + Win) is held or a Win key is down.
+  assert.match(keys, /if \(r === 'down' && !dict\.held && !\(dict\.tracker && dict\.tracker\.winDown\)\) pttStart\(\);/);
   assert.match(keys, /if \(r === 'up' && ptt\.held && !OPEN_MIC\) pttStop\('release'\);/);
   const stop = main.slice(main.indexOf('async function pttStop('), main.indexOf('// Reflex first.'));
   assert.match(stop, /PTT_TAP_MS/, 'a hold shorter than a tap with nothing heard is an app shortcut, not an ask');

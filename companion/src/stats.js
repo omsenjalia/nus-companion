@@ -35,13 +35,19 @@ const MODES = ['voice', 'text', 'guide'];
 const FEATURES = ['reflex', 'hands', 'memory', 'focus_guard', 'reminder', 'guide', 'plan', 'chat', 'voice',
   // Amendment (e), 2026-11-06: a greeting ("hello") is its own feature so it can
   // never count as a first win; the rest name features that had no row before.
-  'greeting', 'rewrite', 'page_read', 'recall', 'project'];
+  'greeting', 'rewrite', 'page_read', 'recall', 'project',
+  // 0.1.37 (ventures/nus/conditor/dictate-0137): hold Ctrl + Win and the words
+  // are typed in. Its own name so engaged can be read with and without it. The
+  // server learns it in the seventh edition; until then its rows are refused.
+  'dictation'];
 const OUTCOMES = ['ok', 'failed', 'no_provider', 'cancelled', 'timeout'];
 const STEPS = ['welcome_seen', 'stats_notice_seen', 'key_prompt_seen', 'key_skipped', 'key_connected', 'first_window_closed',
   // Amendment (e): each tour card reached, the struggle picked on the first
   // card, and the start-with-Windows answer.
   'tour_voice', 'tour_mic', 'tour_key', 'tour_questions', 'tour_home', 'tour_sharing', 'tour_ai', 'tour_guide', 'tour_hands',
-  'tour_dashboard', 'tour_done', 'tour_skipped', 'struggle_picked', 'autostart_on', 'autostart_off'];
+  'tour_dashboard', 'tour_done', 'tour_skipped', 'struggle_picked', 'autostart_on', 'autostart_off',
+  // 0.1.37: the dictation card after the talk key's card (seventh edition on the server).
+  'tour_dictate'];
 // Amendment (e), 2026-11-06: the honest retention ladder. Each list is fixed;
 // anything else is dropped before the send.
 // hook: which retention loop was put in front of the person, or taken up.
@@ -418,6 +424,13 @@ function createStats(o) {
     }
     return track('ask', props);
   }
+  // A dictation (Ctrl + Win): an ask row under its own feature name, spoken. It
+  // is never a first ask and never a first win, so the ladder's activation rungs
+  // mean what they meant before 0.1.37 in both halves of the test. The host
+  // marks the day engaged on its own (a dictation is a real use).
+  function dictation(outcome) {
+    return track('ask', { mode: 'voice', feature: 'dictation', outcome: OUTCOMES.includes(outcome) ? outcome : 'ok' });
+  }
   // The first win: the first task that really worked (the host calls this
   // only once the guide pointed, an answer finished, a reminder was set...),
   // never a hello. Its time is kept on this computer whatever stats say (My
@@ -563,7 +576,7 @@ function createStats(o) {
     return Promise.race([Promise.all(sends).then(rs => rs[rs.length - 2]), settle]);
   }
 
-  return { track, boot, tick, minute, flushSession, activeMinutes: () => activeMinutes, ask, featureSession, onboardingStep, firstRunEnd, crash,
+  return { track, boot, tick, minute, flushSession, activeMinutes: () => activeMinutes, ask, dictation, featureSession, onboardingStep, firstRunEnd, crash,
     keyConnected, sourceAnswer, setEnabled, status, stop, installId: id, enabled, dev: () => dev, updateOffered, noticeShown, noticeClicked, noteOneClick,
     win, engaged, aiReady, hookShown, hookUsed, nudgeGroup,
     gateScreen, gatePress, gatePassed, gateClosed, aiSource, cohort, flush, queued: () => queued().slice() };

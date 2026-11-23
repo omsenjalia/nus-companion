@@ -82,6 +82,7 @@ const { MOD_VKS, modifierChord, createChordTracker } = require('./src/voice/ptt-
 const { macChordMods, watchChordRelease } = require('./src/voice/mac-release');
 // The Mac's words for what this process sends and what the model reads (renderer/mac-words.js).
 const MacWords = require('./renderer/mac-words.js');
+const Dictate = require('./src/dictate');
 const assignmentCapturer = createCaptureClient({ nativeImage, log: m => console.log('[assignment] ' + m) });
 const captureAssignmentDisplay = (displayId, opts) => assignmentCapturer.capture(displayId, opts);
 app.on('before-quit', () => assignmentCapturer.close());
@@ -205,7 +206,7 @@ function send(channel, data) {
       hooks.onVoiceTakeover?.();
     }
   }
-  if (data && data.speak && (!companionVoiceEnabled || ptt.held)) data = { ...data, speak: undefined };
+  if (data && data.speak && (!companionVoiceEnabled || ptt.held || ptt.dictating)) data = { ...data, speak: undefined };
   if (data && data.speak) {
     speakMuteUntil = Date.now() + 900 + String(data.speak).length * 70;
     if (listener) listener.reset();
@@ -1676,6 +1677,8 @@ function applySettingsPatch(patch) {
   if (patch && Object.prototype.hasOwnProperty.call(patch, 'voice')) { try { const st = getVoice().status(); send('voice:state', st); if (st.installed) getVoice().warm(); } catch (_) { /* no voice */ } }
   // The speech model switch: off lets its memory go at once.
   if (patch && Object.prototype.hasOwnProperty.call(patch, 'speechModel')) { try { getParakeet().settingChanged(); } catch (_) { /* whisper answers */ } }
+  // The dictation switch: the probe starts or stops watching the Win keys at once.
+  if (patch && Object.prototype.hasOwnProperty.call(patch, 'dictation')) { applyProbeBase(); routeLog('dictation ' + (dictationOn() ? 'on' : 'off') + ' (' + dictWhy() + ')'); }
   jev.configure({ apiKey: s.apiKeys && s.apiKeys.typesafe });
   if (STANDALONE) {
     const nextOpenMic = s.openMic ?? (process.env.NUS_REFLEX_OPENMIC === '1');
@@ -1764,6 +1767,8 @@ function registerIpc() {
   companionIpc.on('companion:ask', (_e, payload) => runFeature(payload.mode, payload.text));
   companionIpc.on('companion:mic:pcm', (_e, arrayBuffer) => { if (state.capturing) buffers.you.push(Buffer.from(arrayBuffer)); });
   companionIpc.on('companion:ptt:pcm', (_e, arrayBuffer) => {
+    // A dictation holds the mic on its own: its words never reach the talk key's ears.
+    if (dict.held) { dict.chunks.push(Buffer.from(arrayBuffer)); return; }
     if (!ptt.held) return;
     const buf = Buffer.from(arrayBuffer);
     ptt.chunks.push(buf);
@@ -3474,9 +3479,19 @@ function wireProbeEvents() {
   probe.on('click', (e) => { if (guide) guide.onClick({ x: e.x, y: e.y }); if (ASSIGNMENT_WATCH === 'events' && assignment && assignment.isOn()) assignment.poke('click'); });
   probe.on('key', (e) => {
     const vk = Number(e.vk);
+    // Dictation (Ctrl + Win) sees every modifier first. It and the talk key
+    // (Ctrl + Alt) share Ctrl, so each holds the other off: no dictation while
+    // the talk key is held, no talk key while a Win key is down.
+    if (dict.tracker && (MOD_VKS.includes(vk) || Dictate.WIN_VKS.includes(vk))) {
+      const d = dict.tracker.onKey(vk, !!e.down);
+      if (d === 'down' && !ptt.held) dictGate();
+      else if (d === 'up') dictRelease('release');
+      else if (d === 'cancel') dictRelease('cancel');
+      if (Dictate.WIN_VKS.includes(vk)) return;
+    }
     if (ptt.chord && MOD_VKS.includes(vk)) {
       const r = ptt.chord.onKey(vk, !!e.down);
-      if (r === 'down') pttStart();
+      if (r === 'down' && !dict.held && !(dict.tracker && dict.tracker.winDown)) pttStart();
       if (r === 'up' && ptt.held && !OPEN_MIC) pttStop('release');
       return;
     }
@@ -3915,6 +3930,213 @@ async function pttStop(reason) {
   routeUtterance(text, 'voice');
 }
 
+// -------- dictation: hold Ctrl + Win, speak, let go --------
+// The words go in wherever the text cursor is, in any app (src/dictate.js has
+// the rules and why the keys). Speech is written down on this computer only:
+// Parakeet when it is installed, whisper otherwise, never a cloud model. The
+// words go in through the Hands paste (src/reflex/hands.ps1 keys.text), which
+// puts the old clipboard back. No AI is asked, no allowance is touched, and a
+// dictation is never routed as an ask: "open YouTube" said here is typed, not done.
+// Half of installs have it (by install id); Settings turns it on or off for anyone.
+const dict = { held: false, busy: false, chunks: [], startedAt: 0, timer: null, n: 0, target: null, prev: null, tracker: null, gate: null, gateNote: '', nudges: 0 };
+// Parakeet loads in about 3.5 s (measured 2026-11-23) and starts loading as the
+// keys go down; past this after the keys come up, whisper writes the words instead.
+const DICT_LOAD_WAIT_MS = 6000;
+const DICT_DECODE_MS = 8000;
+function dictWhy() { return process.env.NUS_DICTATION === '1' || process.env.NUS_DICTATION === '0' ? 'env' : Dictate.why(store.getSettings(), dictInstallId()); }
+function dictInstallId() { try { return typeof hooks.installId === 'function' ? String(hooks.installId() || '') : ''; } catch (_) { return ''; } }
+// NUS_DICTATION=1 or 0 overrides both the half and the switch (testing a build).
+function dictationOn() {
+  if (!STANDALONE || process.platform !== 'win32') return false;
+  if (process.env.NUS_DICTATION === '1' || process.env.NUS_DICTATION === '0') return process.env.NUS_DICTATION === '1';
+  return Dictate.enabled(store.getSettings(), dictInstallId());
+}
+// A dev run only (never a packaged build): NUS_DICTATE_FAKE_WAV names a 16 kHz
+// mono WAV that stands in for the mic, so the whole path after the mic (the
+// speech model, the paste, the clipboard put back) can be tried with no one talking.
+function dictFakePcm() {
+  if (app.isPackaged || !process.env.NUS_DICTATE_FAKE_WAV) return null;
+  try { const b = fs.readFileSync(process.env.NUS_DICTATE_FAKE_WAV); const i = b.indexOf('data'); return i > 0 ? b.subarray(i + 8, i + 8 + b.readUInt32LE(i + 4)) : null; } catch (_) { return null; }
+}
+// The probe watches the modifiers for the talk key's chord and, with dictation
+// on, the two Win keys too. With dictation off this is exactly what 0.1.36 asked for.
+function applyProbeBase() {
+  if (!probe || !probe.setBase) return;
+  const on = dictationOn() && probeReady();
+  dict.tracker = on ? (dict.tracker || Dictate.createDictateChord()) : null;
+  if (!on) dictRelease('cancel');
+  if (ptt.chord || on) probe.setBase(on ? MOD_VKS.concat(Dictate.WIN_VKS) : MOD_VKS);
+  else probe.setBase(null);
+}
+function dictateCheckDir() { return path.join(app.getPath('userData'), 'dictate-check'); }
+function dictateCheckOn() { try { return process.env.NUS_DICTATE_CHECK === '1' || fs.existsSync(path.join(dictateCheckDir(), 'ON')); } catch (_) { return false; } }
+function noteDictation(outcome) {
+  lastAskAt = Date.now();
+  noteEngaged();
+  if (typeof hooks.onDictation === 'function') { try { hooks.onDictation(outcome); } catch (_) { /* stats never break a dictation */ } }
+}
+
+// Ctrl + Win going down only asks a question: is the keyboard focus somewhere
+// words can go (src/dictate.js focusTakesText, the probe's 'focus.text')? Until
+// the answer is yes nothing wakes: no mic, no Knot, no hint. Windows' own
+// Ctrl + Win shortcuts and a held pair on the desktop pass by unseen.
+const DICT_GATE_MS = 450;         // the probe answers in 3 to 150 ms (measured 2026-11-23)
+const DICT_GATE_RETRY_MS = 200;   // a browser that was asked for the first time needs a moment
+const DICT_NUDGE_MS = 1500;       // a hold this long with no text box was a real try: say why nothing happened
+const DICT_NUDGE_MAX = 3;         // per run; after that the person knows
+async function dictGate() {
+  if (dict.held || dict.busy || dict.gate || !dictationOn()) return;
+  const g = dict.gate = { at: Date.now(), verdict: null, blocked: false };
+  let verdict = { text: 'unknown', why: 'no probe' };
+  if (probeReady()) {
+    const ask = () => probe.request('focus.text', { ignorePid: process.pid }, DICT_GATE_MS).catch(() => null);
+    verdict = Dictate.focusTakesText(await ask());
+    if (verdict.retry && dict.gate === g) {
+      await new Promise((resolve) => setTimeout(resolve, DICT_GATE_RETRY_MS));
+      if (dict.gate === g) verdict = Dictate.focusTakesText(await ask(), { second: true });
+    }
+  }
+  if (dict.gate !== g) return;   // let go (or cancelled) before the answer: a tap, nothing to do
+  g.verdict = verdict;
+  g.ms = Date.now() - g.at;
+  if (!Dictate.gateOpens(verdict, tour && tour.dictating)) {
+    g.blocked = true;
+    routeLog('dictate: not started, ' + verdict.why + ' (' + g.ms + 'ms)');
+    return;
+  }
+  dictStart(g);
+}
+// The keys came up, or another key joined them.
+function dictRelease(reason) {
+  const g = dict.gate;
+  dict.gate = null;
+  if (g && g.blocked && reason === 'release' && Date.now() - g.at >= DICT_NUDGE_MS && (dict.nudges || 0) < DICT_NUDGE_MAX) {
+    dict.nudges = (dict.nudges || 0) + 1;
+    flash(g.verdict && g.verdict.why === 'password' ? 'I do not type into password fields.' : 'Click into a text box first, then hold Ctrl and Win.', 3500);
+  }
+  if (dict.held) dictStop(reason);
+}
+
+function dictStart(gate) {
+  if (dict.held || dict.busy || !dictationOn()) return;
+  if (!win || win.isDestroyed()) return;
+  if (state.capturing) { flash('Listening to a meeting right now. Stop that first to dictate.', 3500); return; }
+  dict.held = true;
+  ptt.dictating = true;   // the Knot says nothing while the mic is open for a dictation (send, above)
+  dict.n++;
+  const n = dict.n;
+  dict.chunks = [];
+  // Held since the keys went down, so a tap is still a tap after the question.
+  dict.startedAt = gate && gate.at ? gate.at : Date.now();
+  dict.gateNote = gate && gate.verdict ? gate.verdict.text + ' (' + gate.verdict.why + ', ' + gate.ms + 'ms)' : '';
+  dict.target = null;
+  // Where the words will go: the window in front now, or the one behind Nūs.
+  if (probeReady()) {
+    Promise.all([probe.request('fg', {}, 800).catch(() => null), probe.request('fg', { ignorePid: process.pid }, 800).catch(() => null)])
+      .then(([front, behind]) => { if (dict.n === n) dict.target = Dictate.pickTarget(front, behind, process.pid); }).catch(() => {});
+  }
+  // The paste helper and the speech model start while the person talks.
+  try { getHands(); } catch (_) { /* the paste says so later */ }
+  try { getParakeet().warm(); } catch (_) { /* whisper answers */ }
+  try { require('../src/stt-local').warm(); } catch (_) { /* whisper-cli carries on */ }
+  speakMuteUntil = 0;
+  hooks.onVoiceTakeover?.();
+  send('ptt:state', { held: true, dictate: true });
+  send('guide:state', { state: 'listening', task: 'guide' });
+  send('guide:hint', { text: 'Dictating. Let go and I type it in.', ms: Dictate.MAX_MS, live: true });
+  dict.timer = setTimeout(() => dictStop('timeout'), Dictate.MAX_MS);
+}
+
+// The words, written down on this computer. -> { text, engine, decodeMs, loadMs }
+async function dictTranscribe(pcm) {
+  const ms = pcm.length / 32;
+  const { clean } = require('./src/reflex/listen');
+  const t0 = Date.now();
+  const wait = (msWait) => new Promise((resolve) => { const t = setTimeout(() => resolve(false), msWait); if (t.unref) t.unref(); });
+  let loadMs = 0;
+  try {
+    const pk = getParakeet();
+    if (pk.wanted()) {
+      const ok = await Promise.race([pk.warm(), wait(DICT_LOAD_WAIT_MS)]);
+      loadMs = Date.now() - t0;
+      if (ok && pk.ready()) {
+        const d0 = Date.now();
+        const words = await Promise.race([pk.transcribe(pcm), wait(DICT_DECODE_MS).then(() => { throw new Error('over budget'); })]);
+        const text = clean(words, ms);
+        if (text) return { text, engine: 'parakeet', decodeMs: Date.now() - d0, loadMs };
+        routeLog('dictate: parakeet heard nothing, whisper tries');
+      } else routeLog('dictate: parakeet not loaded after ' + loadMs + 'ms, whisper writes it');
+    }
+  } catch (e) { routeLog('dictate: parakeet ' + String(e && e.message || e).slice(0, 80) + ', whisper tries'); }
+  const w0 = Date.now();
+  try { const text = await getListener().whole(pcm, { budgetMs: 6000 }); if (text) return { text, engine: 'whisper', decodeMs: Date.now() - w0, loadMs }; } catch (_) { /* whisper-cli next */ }
+  try {
+    const sl = require('../src/stt-local');
+    if (sl.status().available) { const r = await sl.transcribePcm(pcm); const text = clean((r && r.text) || '', ms); if (text) return { text, engine: 'whisper-cli', decodeMs: Date.now() - w0, loadMs }; }
+  } catch (_) { /* nothing on this computer could write it down */ }
+  return { text: '', engine: 'none', decodeMs: Date.now() - w0, loadMs };
+}
+
+async function dictStop(reason) {
+  if (!dict.held) return;
+  const keyUpAt = Date.now();
+  const n = dict.n;
+  dict.held = false;
+  ptt.dictating = false;
+  clearTimeout(dict.timer); dict.timer = null;
+  send('ptt:state', { held: false, dictate: true });
+  const pcm = dictFakePcm() || Buffer.concat(dict.chunks);
+  dict.chunks = [];
+  const heldMs = keyUpAt - dict.startedAt;
+  if (reason === 'cancel' || (reason === 'release' && heldMs < Dictate.TAP_MS)) {
+    routeLog('dictate: ' + (reason === 'cancel' ? 'cancelled, another key joined Ctrl+Win' : 'tap ' + heldMs + 'ms, dropped'));
+    send('guide:hint', { text: ' ', ms: 60, live: true });
+    restoreKnotState();
+    return;
+  }
+  if (pcm.length < PTT_MIN_BYTES || rms16(pcm) < RMS_GATE) { flash('I did not hear anything. Hold Ctrl and Win, and speak.', 3000); restoreKnotState(); return; }
+  dict.busy = true;
+  send('guide:state', { state: 'transcribing', task: 'guide' });
+  let heard = { text: '', engine: 'none', decodeMs: 0, loadMs: 0 }, text = '', paste = null, target = dict.target;
+  try {
+    heard = await dictTranscribe(pcm);
+    if (dict.n !== n) return;
+    if (!target && probeReady()) target = Dictate.pickTarget(null, await probe.request('fg', { ignorePid: process.pid }, 800).catch(() => null), process.pid);
+    text = Dictate.textToPaste(heard.text, target, dict.prev, Date.now());
+    // retype: false, a paste the field read cannot confirm is not typed again (hands.ps1 keys.text).
+    if (text) paste = await getHands().request('keys.text', { text, hwnd: target ? target.hwnd : undefined, selfPid: process.pid, max: 5000, retype: false }, 10000).catch((e) => ({ ok: false, error: e.message }));
+    const outcome = Dictate.outcomeOf({ text, paste });
+    routeLog('dictate: ' + outcome + ', ' + Math.round(pcm.length / 32) + 'ms audio, ' + heard.engine + ' ' + heard.decodeMs + 'ms' + (heard.loadMs ? ' (load ' + heard.loadMs + 'ms)' : '') + ', key up to words ' + (Date.now() - keyUpAt) + 'ms' + (paste ? ', ' + (paste.how || paste.error || paste.refused || '?') : '') + (target ? ' in ' + (target.process || '?') : ', no window') + (dict.gateNote ? ', focus ' + dict.gateNote : ''));
+    noteDictation(outcome);
+    if (outcome === 'ok') {
+      dict.prev = { hwnd: target && target.hwnd, at: Date.now() };
+      send('guide:hint', { text: 'Typed.', ms: 1200, live: true });
+    } else if (!text) flash('I did not catch any words. Hold Ctrl and Win, and try again.', 3500);
+    else if (paste && paste.refused === 'password') send('guide:bubble', { text: 'I do not type into password fields.', anchor: 'knot', task: 'ask', actions: [{ id: 'dismiss', label: 'OK' }], sessionId: null });
+    else {
+      lastRewrite = text.trim();
+      send('guide:bubble', { kicker: 'dictation', text: 'I could not type it there, so here it is:\n\n' + text.trim().slice(0, 1500), anchor: 'knot', task: 'ask', actions: [{ id: 'copy-rewrite', label: 'Copy', primary: true }, { id: 'dismiss', label: 'OK' }], sessionId: null });
+    }
+    if (tour && tour.dictating) tourDictated(outcome);
+  } catch (e) {
+    routeLog('dictate: failed: ' + String(e && e.message || e).slice(0, 160));
+    flash('Dictation did not work that time.', 3000);
+  } finally {
+    dict.busy = false;
+    restoreKnotState();
+    if (dictateCheckOn()) {
+      try {
+        const dir = dictateCheckDir();
+        fs.mkdirSync(dir, { recursive: true });
+        const wav = String(Date.now()) + '.wav';
+        fs.writeFileSync(path.join(dir, wav), pcmToWav(pcm));
+        fs.appendFileSync(path.join(dir, 'log.jsonl'), Dictate.checkLine({ at: keyUpAt, n, audioMs: pcm.length / 32, engine: heard.engine, decodeMs: heard.decodeMs, loadMs: heard.loadMs,
+          keyUpToPasteMs: Date.now() - keyUpAt, raw: heard.text, pasted: text, how: paste && (paste.how || paste.error || paste.refused), verified: paste && paste.verified, app: target && target.process, wav }) + '\n');
+      } catch (e) { routeLog('dictate check: ' + e.message); }
+    }
+  }
+}
+
 // Reflex first. What it acts on never reaches the guide; what it hands back
 // (help requests, questions, anything unsure) carries on as the words did
 // before the reflex layer existed.
@@ -4091,6 +4313,23 @@ function tourCardOut(extra) {
   setTimeout(() => { if (tour) tourWarmLines('card ' + tour.step); }, 500);
   if (tour.step === Tour.STEP.guide && tour.caps.source) tourWatchFront();
   tourUnstick(card);
+}
+// The dictation card: the practice line goes into the person's own app.
+function tourDictateCard() {
+  tour.dictateShown = true;
+  tour.dictating = true;
+  tour.hear = null;
+  const card = Tour.dictateCard({ caps: tour.caps });
+  send('tour:card', card);
+  tourSay(card.spoken);
+  noteStep('tour_dictate');
+  tourNotifyHome();
+  tourUnstick(card);
+}
+function tourDictated(outcome) {
+  if (!tour || !tour.dictating) return;
+  if (outcome === 'ok') { send('tour:update', { status: Tour.DICTATE_DONE_LINE, actions: Tour.continueActions(false) }); tourSay(Tour.DICTATE_DONE_LINE); }
+  else send('tour:update', { status: Tour.DICTATE_MISSED_LINE });
 }
 // Every waiting Continue lights after Tour.UNSTICK_MS whatever happened (friend test of 0.1.20).
 function tourUnstick(card) {
@@ -4339,6 +4578,9 @@ function tourAction(action, text) {
 }
 function tourNext() {
   if (!tour) return;
+  // Dictation's card (0.1.37, its half of installs) comes once, after the talk key's.
+  if (tour.step === Tour.STEP.key && !tour.dictateShown && dictationOn()) { tourDictateCard(); return; }
+  tour.dictating = false;
   if (tour.step >= Tour.OF) { tourEnd('done'); return; }
   // A demo's thread winds back as the next card comes; the sheet is already up.
   if (guide && guide.active()) guide.dismiss('tour');
@@ -4980,11 +5222,11 @@ function registerPttShortcut() {
   const sttNote = ', transcription: ' + (stt.available ? stt.providers.join(' > ') : 'none');
   if (modifierChord(wanted)) {
     if (probeReady() && probe.setBase) {
-      probe.setBase(MOD_VKS);
       ptt.chord = createChordTracker(wanted);
+      applyProbeBase();
       ptt.accelerator = wanted;
       ptt.vk = 0;
-      console.log('[ptt] chord ' + wanted + ' (held modifiers, watched by the probe)' + sttNote);
+      console.log('[ptt] chord ' + wanted + ' (held modifiers, watched by the probe)' + sttNote + (dict.tracker ? '; dictation on Ctrl+Win (' + dictWhy() + ')' : ''));
       return;
     }
     if (process.platform === 'win32' && !SMOKE_RUN && (!probe || (!probe.status().lastError && !probe.status().restarts))) {
@@ -4996,7 +5238,7 @@ function registerPttShortcut() {
     }
     console.log('[ptt] ' + wanted + ' needs the probe; the old hotkey carries on');
     wanted = LEGACY_PTT_SHORTCUT;
-  } else if (probe && probe.setBase) probe.setBase(null);
+  } else applyProbeBase();
   const candidates = [wanted, ...PTT_FALLBACKS.filter((c) => c !== wanted)];
   for (const accel of candidates) {
     if (RESERVED_SHORTCUTS.has(accel.toLowerCase()) && accel.toLowerCase() !== LEGACY_PTT_SHORTCUT.toLowerCase()) continue;
@@ -5503,6 +5745,8 @@ function initCompanion(providedHooks = {}) {
     enable: enableCompanion,
     status: companionStatus,
     setSettings: applySettingsPatch,
+    // Dictation (src/dictate.js): on for this install, and why (a setting, or its half of the test).
+    dictation: () => ({ on: dictationOn(), why: dictWhy(), keys: Dictate.DICTATE_KEYCAPS.join(' + ') }),
     setPttShortcut,
     keeps: () => getWalkthroughs().list(),
     forgetKeep: key => getWalkthroughs().forget(key),
