@@ -91,10 +91,11 @@ test('an empty publik balance: publik\'s message, the free week with its card an
 });
 
 test('Nvidia\'s removed 11b vision model is retired, in the defaults and in a saved settings file', () => {
+  // 0.1.36: the 90b it moved to was ended too (2026-11-16); both now go to Nemotron 3.5 Super VL
+  // (companion/test/nvidia-model-0136.test.js loads a saved file through the store).
   const store = read('companion/src/store.js');
-  assert.match(store, /nvidia: \{ fast: 'meta\/llama-3\.2-90b-vision-instruct', smart: 'meta\/llama-3\.2-90b-vision-instruct' \}/);
-  assert.match(store, /nvidia: \{\s*'meta\/llama-3\.2-11b-vision-instruct': 'meta\/llama-3\.2-90b-vision-instruct',\s*\}/);
-  assert.equal((store.match(/llama-3\.2-11b-vision-instruct/g) || []).length, 2, 'only the retirement row and its note name the removed model');
+  assert.match(store, /nvidia: \{ fast: 'nvidia\/nemotron-3\.5-super-vl-120b-a12b', smart: 'nvidia\/nemotron-3\.5-super-vl-120b-a12b' \}/);
+  assert.match(store, /'meta\/llama-3\.2-11b-vision-instruct': 'nvidia\/nemotron-3\.5-super-vl-120b-a12b',/);
 });
 
 function rig(asks, extra = {}) {
@@ -149,5 +150,5 @@ test('the build config and publik\'s module carry the same release version', () 
   const mod = /const APP_VERSION = "(\d+\.\d+\.\d+)";/.exec(read('companion/src/publik/publik.js'));
   assert.ok(build && mod, 'both name a version');
   assert.equal(mod[1], build[1]);
-  assert.equal(build[1], '0.1.35');
+  assert.equal(build[1], '0.1.36');
 });

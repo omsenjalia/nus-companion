@@ -66,7 +66,7 @@ function plainAskError(provider, raw) {
   if (/API key not valid|API_KEY_INVALID|invalid.{0,12}(api.?)?key|authentication|unauthori[sz]ed|\b401\b/i.test(text)) return Who + ' did not accept your key. Check it in ' + keys + '; the Test button there says what is wrong.';
   if (/PERMISSION_DENIED|SERVICE_DISABLED|forbidden|\b403\b/i.test(text)) return Who + ' refused this key. Check it in ' + keys + '.';
   if (/location|region|not supported in your/i.test(text)) return 'Gemini\'s free key does not work where you are. Claude Code or an Anthropic key in ' + keys + ' works instead.';
-  if (/\b404\b|not found|no longer available/i.test(text)) return Who + ' no longer offers the model Nūs asked for. Use another key in ' + keys + ' for now.';
+  if (/\b404\b|\b410\b|not found|no longer available|end of life/i.test(text)) return Who + ' no longer offers the model Nūs asked for. Use another key in ' + keys + ' for now.';
   if (/SAFETY|blocked|content policy|refus/i.test(text)) return Who + ' would not answer that one. Try asking another way.';
   if (/incomplete model reply|max_tokens|MAX_TOKENS/i.test(text)) return 'The answer got cut off. Ask again, or ask for less at once.';
   if (/empty reply/i.test(text)) return Who + ' sent back nothing. Ask again.';
@@ -91,7 +91,7 @@ function ownKeyStuck(provider, raw) {
   if (/API key not valid|API_KEY_INVALID|invalid.{0,12}(api.?)?key|authentication|unauthori[sz]ed|\b401\b/i.test(text)) return true;
   if (/PERMISSION_DENIED|SERVICE_DISABLED|forbidden|\b403\b/i.test(text)) return true;
   if (/location|region|not supported in your/i.test(text)) return true;
-  if (/\b404\b|not found|no longer available/i.test(text)) return true;
+  if (/\b404\b|\b410\b|not found|no longer available|end of life/i.test(text)) return true;
   return false;
 }
 

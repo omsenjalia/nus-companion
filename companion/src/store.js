@@ -125,9 +125,12 @@ const DEFAULTS = {
     anthropic: { fast: 'claude-haiku-4-5', smart: 'claude-sonnet-5' },
     // 2026-09-15: gemini-2.5-* returns 404 "no longer available to new users".
     gemini: { fast: 'gemini-3.6-flash', smart: 'gemini-3.6-pro' },
-    // 2026-11-13 (feedback): Nvidia removed meta/llama-3.2-11b-vision-instruct, so every ask on an
-    // Nvidia key failed. Its model list on 2026-11-15 still has the 90b vision model; both tiers use it.
-    nvidia: { fast: 'meta/llama-3.2-90b-vision-instruct', smart: 'meta/llama-3.2-90b-vision-instruct' }
+    // 2026-11-22 (a user report: Gemini and Nvidia keys both failed): Nvidia
+    // ended the Llama 3.2 vision models, the 90b on 2026-11-16 (410 Gone, "reached its end of
+    // life"), the 11b before it, so every ask on an Nvidia key failed. Nemotron 3.5 Super VL is
+    // Nvidia's own vision model (GA 2026-10-15, no end date listed); both tiers use it. It thinks
+    // by default, so llm.js sends reasoning_effort "none" with it (nvidiaArgs).
+    nvidia: { fast: 'nvidia/nemotron-3.5-super-vl-120b-a12b', smart: 'nvidia/nemotron-3.5-super-vl-120b-a12b' }
   }
 };
 
@@ -142,7 +145,8 @@ const RETIRED_MODELS = {
     'claude-3-5-sonnet-latest': 'claude-sonnet-5',
   },
   nvidia: {
-    'meta/llama-3.2-11b-vision-instruct': 'meta/llama-3.2-90b-vision-instruct',
+    'meta/llama-3.2-11b-vision-instruct': 'nvidia/nemotron-3.5-super-vl-120b-a12b',
+    'meta/llama-3.2-90b-vision-instruct': 'nvidia/nemotron-3.5-super-vl-120b-a12b',
   },
 };
 

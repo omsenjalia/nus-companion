@@ -50,7 +50,8 @@ function plainKeyError(provider, raw) {
     if (net.test(text)) return 'Nūs could not reach Nvidia. Check your internet, then press Test again.';
     if (/\b40[13]\b|unauthori[sz]ed|forbidden|invalid.{0,20}key/i.test(text)) return 'Nvidia did not accept this key. Copy it again from build.nvidia.com; it starts with nvapi-.';
     if (/\b402\b|credit|quota|\b429\b|rate limit/i.test(text)) return 'This Nvidia key is out of free credits or hit its limit. Try again later, or use a free Gemini key.';
-    if (/\b404\b|not found/i.test(text)) return 'Nvidia no longer offers the model Nūs asked for. Use a free Gemini key for now.';
+    // 410 Gone: "The model ... has reached its end of life ... and is no longer available." (2026-11-16)
+    if (/\b404\b|\b410\b|not found|no longer available|end of life/i.test(text)) return 'Nvidia no longer offers the model Nūs asked for. Use a free Gemini key for now.';
     return 'That key did not work. Copy it again from build.nvidia.com.';
   }
   if (provider === 'anthropic') {

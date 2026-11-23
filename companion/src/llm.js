@@ -12,8 +12,10 @@ function stripDataUrl(dataUrl) {
 // probe 2026-11-15: 2 of 8 calls; 67 of 216 guide calls in the pointing
 // measurement, every one with its text already complete). With this set, once
 // text has arrived, that long without a new token ends the call with the text.
-async function streamOpenAI({ apiKey, model, system, turns, imageDataUrl, maxTokens, onToken, baseURL, signal, idleAfterTextMs }) {
-  if (idleAfterTextMs > 0) return streamUntilIdle({ apiKey, model, system, turns, imageDataUrl, maxTokens, onToken, baseURL, signal }, idleAfterTextMs);
+// extra: fields one provider needs in the request body and others would refuse (Nvidia's
+// Nemotron takes reasoning_effort; see nvidiaArgs).
+async function streamOpenAI({ apiKey, model, system, turns, imageDataUrl, maxTokens, onToken, baseURL, signal, idleAfterTextMs, extra }) {
+  if (idleAfterTextMs > 0) return streamUntilIdle({ apiKey, model, system, turns, imageDataUrl, maxTokens, onToken, baseURL, signal, extra }, idleAfterTextMs);
   if (DEBUG) console.log('[DEBUG LLM] streamOpenAI called', { model, baseURL, hasImage: !!imageDataUrl, maxTokens });
   const OpenAI = require('openai');
   const client = new OpenAI({ apiKey, baseURL });
@@ -33,7 +35,7 @@ async function streamOpenAI({ apiKey, model, system, turns, imageDataUrl, maxTok
   try {
     // signal: a stop (Esc, "stop") closes the stream instead of letting the
     // reply run to completion (2026-10-31; the Anthropic and Gemini paths already did).
-    const stream = await client.chat.completions.create({ model, messages, stream: true, max_tokens: maxTokens }, signal ? { signal } : undefined);
+    const stream = await client.chat.completions.create({ ...(extra || {}), model, messages, stream: true, max_tokens: maxTokens }, signal ? { signal } : undefined);
     let full = '';
     for await (const part of stream) {
       if (signal && signal.aborted) { const e = new Error('aborted'); e.name = 'AbortError'; throw e; }
@@ -258,12 +260,25 @@ function publikLLM() {
   };
 }
 
-function createLLM(settings) {
+// Nvidia's OpenAI-compatible endpoint. Nemotron models think before answering unless told not to
+// (reasoning_effort defaults to "high" there): slower asks, and the key Test's 8-token budget
+// would be spent on thinking. Other Nvidia models refuse fields they do not list, so only
+// Nemotron gets it.
+const NVIDIA_BASE_URL = 'https://integrate.api.nvidia.com/v1';
+function nvidiaArgs(args) {
+  const extra = /nemotron/i.test(String(args.model || '')) ? { reasoning_effort: 'none' } : undefined;
+  return { ...args, baseURL: NVIDIA_BASE_URL, extra };
+}
+
+// opts.ownKey: the person's own key for settings.provider even when publik answers the asks. The
+// key Test in Settings uses it (0.1.36): with the choice on publik, "Test" on a Gemini or Nvidia
+// key pinged publik, and an empty publik balance read as "That key did not work".
+function createLLM(settings, opts = {}) {
   // NUS_COMPANION_CLAUDE_API=1 (launch-day1.ps1 -ClaudeApi): Claude through the
   // ANTHROPIC_API_KEY already in the environment, whatever the settings say.
   // Opt-in because it spends API credits; the key is never written to settings.
   const envClaude = process.env.NUS_COMPANION_CLAUDE_API === '1' && !!process.env.ANTHROPIC_API_KEY;
-  if (!envClaude && publik && publik.active()) return publikLLM()(settings);
+  if (!envClaude && !opts.ownKey && publik && publik.active()) return publikLLM()(settings);
   const provider = envClaude ? 'anthropic' : settings.provider;
   const keys = settings.apiKeys || {};
   const apiKey = envClaude ? process.env.ANTHROPIC_API_KEY : keys[provider];
@@ -283,7 +298,7 @@ function createLLM(settings) {
       if (DEBUG) console.log('[DEBUG LLM] stream() invoked for provider:', provider);
       const args = { apiKey, model, maxTokens, ...paramsWithComputer(params) };
       if (provider === 'openai') return streamOpenAI(args);
-      if (provider === 'nvidia') return streamOpenAI({ ...args, baseURL: 'https://integrate.api.nvidia.com/v1' });
+      if (provider === 'nvidia') return streamOpenAI(nvidiaArgs(args));
       if (provider === 'anthropic') return streamAnthropic(args);
       if (provider === 'gemini') return geminiStream(args);
       throw new Error('unknown provider: ' + provider);
@@ -296,11 +311,11 @@ function createLLM(settings) {
       if (provider === 'gemini') return geminiComplete(args);
       // The other SDKs stream fine; collect and return.
       if (provider === 'openai') return streamOpenAI(args);
-      if (provider === 'nvidia') return streamOpenAI({ ...args, baseURL: 'https://integrate.api.nvidia.com/v1' });
+      if (provider === 'nvidia') return streamOpenAI(nvidiaArgs(args));
       if (provider === 'anthropic') return streamAnthropic(args);
       throw new Error('unknown provider: ' + provider);
     }
   };
 }
 
-module.exports = { createLLM, streamOpenAI, PUBLIK_IDLE_AFTER_TEXT_MS, LOOKS_FINISHED, withBusyRetry, isBusy, BUSY_RETRY_MS };
+module.exports = { createLLM, streamOpenAI, nvidiaArgs, NVIDIA_BASE_URL, PUBLIK_IDLE_AFTER_TEXT_MS, LOOKS_FINISHED, withBusyRetry, isBusy, BUSY_RETRY_MS };

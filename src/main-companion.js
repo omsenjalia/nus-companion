@@ -355,7 +355,8 @@ async function testKeys(which) {
   const keys = Object.values(s.apiKeys || {});
   const jev = require('../companion/src/reflex/jev');
   const ping = provider => async () => {
-    const llm = createLLM({ ...s, provider, smart: false });
+    // ownKey: test the key itself, even while publik answers the asks (0.1.36; it pinged publik).
+    const llm = createLLM({ ...s, provider, smart: false }, { ownKey: true });
     if (!llm.ready) return { error: 'no key' };
     const text = await llm.complete({ system: 'Reply with exactly the word OK.', turns: [{ role: 'user', text: 'ping' }], maxTokens: 8 });
     return /ok/i.test(String(text)) ? { ok: true } : { ok: true, error: '' };
