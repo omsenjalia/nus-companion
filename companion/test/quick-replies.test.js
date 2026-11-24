@@ -277,7 +277,8 @@ test('the reply after an ack queues behind it; without an ack a new reply still 
   assert.ok(cancels > c0);
   // A ready-made line plays in the Knot's voice even while the model loads.
   assert.match(ui, /ownVoice\.ready \|\| \(opts && opts\.cached && ownVoice\.installed\)/);
-  assert.match(ui, /say\(p\.text, \{ restart: !!p\.first, ack: !!p\.ack, cached: !!p\.cached \}\)/);
+  // (0.1.38: the line also carries its sentence number, for marks drawn as it is spoken.)
+  assert.match(ui, /say\(p\.text, \{ restart: !!p\.first, ack: !!p\.ack, cached: !!p\.cached, sid: [^}]+\}\)/);
 });
 
 test('small talk and hello are answered by code, before Hands, the reflex layer or a model', () => {

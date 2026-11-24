@@ -148,6 +148,10 @@ function unstuck(actions) { return (actions || []).map((a) => (a.id === 'tour-ne
 // What a card waits to hear, typed or spoken: the name on the talk-key card, the first question on
 // the questions card. The same whether the microphone works or the person types (0.1.20 set nothing
 // for a typed name, so the typed name was dropped).
+// 0.1.40: nothing can answer yet (no key, no Claude Code, publik not the answer): the AI card comes
+// right after the hello, not as card 7, so the person can get answers before anything else.
+function aiFirst(caps) { const c = caps || {}; return !!c.aiKnown && !c.keyReady && !c.cli && !c.publik; }
+const GET_KEY_LINE = 'AI Studio is open in your browser. Make a key there, copy it, and paste it here.';
 function hearFor(step) { return step === STEP.key ? 'name' : step === STEP.questions ? 'q1' : null; }
 // A typed name: the same reading as a spoken one, and if that finds no name, the words themselves
 // when they look like a name (up to four words of letters). '' when it is not a name.
@@ -215,7 +219,7 @@ function card(step, info = {}) {
     if (caps.cli) return Object.assign(base, { kind: 'ai', title: 'Who answers', body: 'Claude Code is installed on this computer. If it is signed in, I use it to answer and to point, with no key at all.', spoken: 'Claude Code is here, so I can answer with no key.', note: 'A Gemini or Anthropic key can go on the dashboard, under Settings, Keys.', status: '', actions: continueActions(false) });
     if (caps.keyReady) return Object.assign(base, { kind: 'ai', title: 'Who answers', body: 'An AI key is saved already. I use it to answer and to point.', spoken: 'Your AI key is saved. I can answer and point.', note: 'Keys live on the dashboard, under Settings, Keys.', status: '', actions: continueActions(false) });
     return Object.assign(base, { kind: 'ai', title: 'Who answers', body: 'Paste a free Gemini key, or an Anthropic key. It stays on this device, encrypted. You can add or change it any time on the dashboard, under Settings, Keys.', spoken: 'Who answers your questions? Paste a key here, or later on the dashboard.',
-      input: { action: 'tour-key', placeholder: 'Gemini or Anthropic key', label: 'Save', secret: true }, status: '', actions: [{ id: 'tour-next', label: 'Later' }] });
+      input: { action: 'tour-key', placeholder: 'Gemini or Anthropic key', label: 'Save', secret: true }, status: '', actions: [{ id: 'tour-get-key', label: 'Get a free key' }, { id: 'tour-next', label: 'Later' }] });
   }
   if (step === STEP.guide) {
     if (caps.source && caps.macTyped) return Object.assign(base, { kind: 'guide', title: 'I see what you see', body: 'Click me and type a question about the window behind this card.', spoken: 'Click me and type a question about the window behind this card.', chip: GUIDE_CHIP_ANY, status: '', actions: continueActions(true) });
@@ -281,6 +285,6 @@ function cachedLines(mac = process.platform === 'darwin') {
   return [...lines].filter(Boolean);
 }
 
-module.exports = { HELLO_LINE, HELLO_UNTYPED_LINE, HELLO_ACTIONS, STEP, OF, QUESTIONS, HANDS_LINES, TRY_CHIPS, FIRST_WINS, firstWins, GUIDE_DEMO_LINE, guideChip, HANDS_CARD, HANDS_DONE_LINE, HANDS_UNSURE_LINE, NOT_ENGLISH_LINE, VOICE_MB, VOICE_LANDED_LINE, VOICE_FAILED_LINE, DASHBOARD_STOPS, DASHBOARD_DONE_LINE, DASHBOARD_TUCK, DASHBOARD_FAILED_LINE, HOME_CHANGED_LINE, KEY_OK_LINE, KEY_BAD_LINE, KEY_FAILED_LINE,
+module.exports = { aiFirst, GET_KEY_LINE, HELLO_LINE, HELLO_UNTYPED_LINE, HELLO_ACTIONS, STEP, OF, QUESTIONS, HANDS_LINES, TRY_CHIPS, FIRST_WINS, firstWins, GUIDE_DEMO_LINE, guideChip, HANDS_CARD, HANDS_DONE_LINE, HANDS_UNSURE_LINE, NOT_ENGLISH_LINE, VOICE_MB, VOICE_LANDED_LINE, VOICE_FAILED_LINE, DASHBOARD_STOPS, DASHBOARD_DONE_LINE, DASHBOARD_TUCK, DASHBOARD_FAILED_LINE, HOME_CHANGED_LINE, KEY_OK_LINE, KEY_BAD_LINE, KEY_FAILED_LINE,
   shouldShow, onFirstWindow, englishLocale, nameFrom, typedName, hearFor, UNSTICK_MS, stuck, unstuck, keyCheck, keycaps, skipStep, continueActions, qaRows, homeChoices, sharingToggle, progressOf, card, tuckLine, spokenLines, cachedLines,
   DICTATE_PRACTICE, DICTATE_DONE_LINE, DICTATE_MISSED_LINE, dictateCard };

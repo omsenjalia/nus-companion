@@ -85,7 +85,8 @@ test('the settings cards: where the Knot lives, screen sharing, who answers', ()
   assert.equal(forced.toggle.disabled, true); assert.match(forced.note, /this session/);
   const ai = T.card(T.STEP.ai, { caps: full });
   assert.deepEqual(ai.input, { action: 'tour-key', placeholder: 'Gemini or Anthropic key', label: 'Save', secret: true });
-  assert.deepEqual(ai.actions, [{ id: 'tour-next', label: 'Later' }]);
+  // 0.1.40: "Get a free key" opens AI Studio (own-key-0140.test.js).
+  assert.deepEqual(ai.actions, [{ id: 'tour-get-key', label: 'Get a free key' }, { id: 'tour-next', label: 'Later' }]);
   assert.match(ai.body, /dashboard, under Settings, Keys/);
   const cli = T.card(T.STEP.ai, { caps: Object.assign({}, full, { cli: true }) });
   assert.match(cli.body, /Claude Code is installed/); assert.equal(cli.input, undefined); assert.deepEqual(cli.actions, T.continueActions(false));

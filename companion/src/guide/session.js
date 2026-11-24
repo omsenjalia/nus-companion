@@ -50,6 +50,8 @@ const { regionFor } = require('./region');
 const { plainAskError } = require('../ask-error');
 const { buildScreenAnswer, answerMs } = require('./screen-answer');
 const { answerish, handsAskBack, noClickLine } = require('./screen-ask');
+const { resolveMark, sameMark, MAX_MARKS } = require('./marks');
+const { difference } = require('./settle');
 
 const MAX_STEPS = 12;
 const MODEL_TIMEOUT_MS = 75000;   // Claude Code cold start + an image read can take a while
@@ -57,6 +59,19 @@ const SETTLE_MS = 450;          // fixed nap after a click, only when no screen 
 const EXPLAIN_MS = 10000;       // an explanation bubble goes away on its own
 const FAST_PREV_MS = 600;       // after the thread moves off a quick pick, a click on the old spot still counts
 const VK_ESCAPE = 27;
+// Drawing on the screen (src/guide/marks.js).
+const DRAW_LIST_BUDGET_MS = 900;  // the control walk for an answer that may draw
+const DRAW_LIST_WAIT_MS = 350;    // how long the ask waits for that walk after the capture is in
+const MARKS_LINGER_MS = 4000;     // an answer with marks stays up this much longer
+const MARKS_SETTLE_MS = 1500;     // the bubble and the strokes land before the screen is watched
+const MARKS_WATCH_MS = 700;       // how often the screen is looked at while marks are up
+const FOUND_MS = 12000;           // a thing found on the screen stays ringed this long
+const FOUND_FRAME_SHARE = 0.3;    // wider than this share of the screen, it gets a frame, not a ring
+const PAGE_WAIT_MS = 1500;        // how long a drawing answer waits for the window's own words
+const PEN_WAIT_LINE = 'Checking it line by line.';
+const PEN_PUBLIK_MODEL = 'publik-smart';   // a check of someone's work, on publik: the careful tier
+const MARKS_LIGHT = 0.55;        // brightness (0..1) under a mark from which the page counts as light
+const MARKS_MOVED = 8;           // mean gray change (0..255) that means the screen moved (a scroll is 10 to 40)
 // A step may be kept for replay only when the model stood behind it.
 const TRUSTED = new Set(['model', 'agree', 'replay']);
 
@@ -142,7 +157,10 @@ class GuideSession {
     // opts.answer: a question about the screen (src/guide/screen-ask.js mode),
     // answered in words from one screenshot. No pointer, no steps.
     const answer = opts && opts.answer ? (opts.answer === true ? 'ask' : String(opts.answer)) : null;
-    this.session = { id: 'g' + now.toString(36), task, source: source || 'typed', startedAt: now, askedAt: (opts && opts.askedAt) || now, clickAt: null, app: null, steps: [], target: null, hashes: null, unchanged: 0, replay: null, epoch: 0, seq: 0, prevTarget: null, plan: null, T: null, answer };
+    // opts.page: the ask is about the whole page ("summarize this"). The
+    // window's own words are read too, so the answer covers what runs past
+    // the screen and can still mark what is on it.
+    this.session = { id: 'g' + now.toString(36), task, source: source || 'typed', startedAt: now, askedAt: (opts && opts.askedAt) || now, clickAt: null, app: null, steps: [], target: null, hashes: null, unchanged: 0, replay: null, epoch: 0, seq: 0, prevTarget: null, plan: null, T: null, answer, page: !!(answer && opts && opts.page) };
     this.d.log('start: ' + task);
     await this.begin(gen);
     return true;
@@ -501,7 +519,7 @@ class GuideSession {
     }
     if (prov) this.retract();
     // Nothing to click for what was really a question: answer it from the same screenshot.
-    if (outcome.kind === 'answer') { this.d.log('pointing gave way to an answer (' + outcome.why + ')'); await this.answerScreen(gen, { fg, cap, why: outcome.why }); return; }
+    if (outcome.kind === 'answer') { this.d.log('pointing gave way to an answer (' + outcome.why + ')'); await this.answerScreen(gen, { fg, cap, why: outcome.why, list: listRes }); return; }
     if (outcome.kind === 'finish') this.finish(outcome.text); else this.explain(outcome.text, { fail: outcome.why === 'fail', provider: outcome.provider, err: outcome.err });
   }
 
@@ -517,46 +535,201 @@ class GuideSession {
     const T = s.T = this.newTiming('answer');
     const now = () => this.d.now();
     let fg = have.fg, cap = have.cap || null;
+    // Drawing (src/guide/marks.js): the answer marks what it talks about. It
+    // needs what Windows knows is on the screen: the control list, and the
+    // words with their places. Both are read beside the capture and the model
+    // call, never in front of them.
+    const drawing = this.drawOn() && (s.answer || 'ask') !== 'read';
+    // The red pen (a check of their work) marks words, so it needs no control
+    // walk, and it is worth the careful brain: the quick one called wrong work
+    // right (live 2026-11-23, and the paid check before it).
+    const pen = drawing && s.answer === 'check';
+    // It takes about 8 s to its first word (measured on publik-smart; the quick
+    // tier caught 2 of 5 mistakes and the middle one wrote nothing), so the wait
+    // is said and shown: asked by voice, the line is spoken after the short ack.
+    if (pen) {
+      this.d.send('guide:hint', { text: PEN_WAIT_LINE, ms: 12000 });
+      if (s.source === 'voice') this.d.send('guide:say', { text: PEN_WAIT_LINE, first: true, sessionId: s.id, stream: 'guide:' + s.id });
+    }
+    const probe = this.d.probe && this.d.probe.available ? this.d.probe : null;
+    let listP = drawing && !pen && have.list ? Promise.resolve(have.list) : null;
+    const walk = () => { if (drawing && !pen && !listP && probe && fg && fg.hwnd) listP = probe.request('uia.list', { hwnd: fg.hwnd, max: 150, budgetMs: DRAW_LIST_BUDGET_MS }, 2500).catch((e) => { this.d.log('uia.list failed: ' + e.message); return null; }); };
     if (!cap && have.snap && have.snap.cap) {
       cap = have.snap.cap; fg = have.snap.fg;
+      if (drawing && !pen && !listP && have.snap.list) listP = Promise.resolve(have.snap.list);
       T.prefetch = 'hit(' + have.snap.age + 'ms)';
       if (have.snap.capMs != null) { T.cap = have.snap.capMs; T.fg = have.snap.fgMs; }
     }
     if (!cap) {
       if (fg === undefined) { const tf = now(); fg = await this.foreground(); T.fg = now() - tf; if (gen !== this.gen) return; }
+      walk();
       const tc = now();
       cap = await Promise.resolve().then(() => this.d.capture()).then((c) => { T.cap = now() - tc; return c; }, (e) => { this.d.log('capture failed: ' + whyFailed(e)); return null; });
-    }
+    } else walk();
     if (gen !== this.gen) return;
     if (fg) s.app = { title: fg.title || '', process: fg.process || '', hwnd: fg.hwnd };
     if (!cap || !cap.dataUrl) { this.explain(CAPTURE_FAILED_LINE); return; }
     const llm = this.d.llm();
     if (!llm || !llm.ready) { this.explain('No AI is set up yet, so I cannot answer. Open Settings to sign in or add a key.', { fail: true, provider: '', err: 'No AI is set up' }); return; }
     T.provider = llm.provider || '';
-    const req = buildScreenAnswer({ ask: s.task, mode: s.answer || 'ask', window: s.app || {} });
-    this.d.log('answer from the screen (' + (s.answer || 'ask') + (have.why ? ', pointer: ' + have.why : '') + ')');
-    const rs = new ReplyStream();
+    const originPhys = this.d.dipToScreen({ x: cap.display.bounds.x, y: cap.display.bounds.y });
+    const toElements = (res) => ((res && res.elements) || []).filter((e) => e && e.rect).map((e) => ({ id: e.id, name: e.name, type: e.type, automationId: e.automationId, isPassword: e.isPassword === true, rect: e.rect, box: (() => { const n = normRectFromPhys(e.rect, cap, originPhys); return [n.x, n.y, n.w, n.h]; })() }));
+    // The list goes into the ask when it is in by now (it usually is: the walk
+    // started before the capture). A slow walk does not hold the answer up: the
+    // model then marks by words and boxes, and the list still places them.
+    let listed = null;
+    if (listP) {
+      const tu = now();
+      const res = await Promise.race([listP, this.d.sleep(DRAW_LIST_WAIT_MS).then(() => undefined)]);
+      if (gen !== this.gen) return;
+      if (res !== undefined) { listed = toElements(res); T.uia = now() - tu; T.uiaInfo = String(listed.length); }
+    }
+    // The words and where they are, read off this same screen by Windows.
+    const wordsP = drawing && this.d.readWords
+      ? Promise.resolve().then(() => this.d.readWords(cap)).catch((e) => { this.d.log('marks: no word boxes (' + e.message + ')'); return null; })
+      : Promise.resolve(null);
+    // The window's own words, for an ask about the whole page.
+    let pageText = null;
+    if (s.page && this.d.pageText) {
+      const tp = now();
+      pageText = await Promise.race([Promise.resolve().then(() => this.d.pageText(fg)).catch(() => null), this.d.sleep(PAGE_WAIT_MS).then(() => null)]);
+      if (gen !== this.gen) return;
+      T.page = now() - tp;
+    }
+    const req = buildScreenAnswer({ ask: s.task, mode: s.answer || 'ask', window: s.app || {}, draw: drawing, elements: listed, pageText });
+    this.d.log('answer from the screen (' + (s.answer || 'ask') + (have.why ? ', pointer: ' + have.why : '') + (drawing ? ', drawing, ' + (listed ? listed.length + ' controls' : 'no control list') : '') + (s.page ? ', ' + (pageText ? pageText.length + ' chars of the page' : 'no page words') : '') + ')');
+    const rs = new ReplyStream({ marks: drawing });
     let said = 0;
     const t0 = now();
     const speak = (ev) => {
-      if (ev.type !== 'speech' || gen !== this.gen || s.epoch !== epoch) return;
+      if (gen !== this.gen || s.epoch !== epoch) return;
       if (said === 0 && T.firstSpeech == null) T.firstSpeech = now() - t0;
-      this.sayEarly(ev.text, said++ === 0, epoch);
+      this.sayEarly(ev.text, said++ === 0, epoch, ev.sentence);
     };
+    // Each mark is placed as soon as the list and the words are in, in the
+    // order the answer made them, and sent with the number of its sentence so
+    // the overlay draws it as that sentence is spoken.
+    const tally = { asked: 0, drawn: 0, dropped: 0, sources: [], missed: [] };
+    const sent = [];
+    let chain = Promise.resolve();
+    const mark = (ev) => {
+      if (gen !== this.gen || s.epoch !== epoch) return;
+      tally.asked += 1;
+      if (tally.asked > MAX_MARKS) { tally.dropped += 1; return; }
+      chain = chain.then(async () => {
+        const [ocr, res] = await Promise.all([wordsP, listP || Promise.resolve(null)]);
+        if (gen !== this.gen || s.epoch !== epoch) return;
+        const elements = listed || toElements(res);
+        const placed = resolveMark(ev, { elements, ocr, cap, originPhys, ids: !!listed });
+        if (!placed && tally.missed.length < MAX_MARKS) tally.missed.push(ev.shape + ' ' + (ev.target.kind === 'words' ? '"' + String(ev.target.text).slice(0, 40) + '"' : ev.target.kind === 'element' ? 'id ' + ev.target.id : 'a box'));
+        if (!placed || sent.some((m) => sameMark(m, placed))) { tally.dropped += 1; this.d.log('marks: not drawn (' + (placed ? 'same place twice' : 'could not place ' + ev.shape + ' ' + JSON.stringify(ev.target)) + ')'); return; }
+        sent.push(placed);
+        tally.drawn += 1; tally.sources.push(placed.source);
+        if (T.firstMark == null) T.firstMark = now() - t0;
+        const win = (r) => physRectToWindow(r, this.d.winBounds(), this.d.screenToDip);
+        const out = placed.shape === 'arrow'
+          ? Object.assign({ shape: 'arrow', from: win(placed.from), to: win(placed.to), verified: placed.verified }, placed.bow ? { bow: placed.bow } : {})
+          : Object.assign({ shape: placed.shape, rects: placed.rects.map(win), verified: placed.verified }, placed.fix ? { fix: placed.fix } : {}, placed.above ? { above: true } : {});
+        // A bright page under it: the overlay draws a dark line there, not a white one.
+        if (this.onLight(cap, placed.shape === 'arrow' ? [placed.from, placed.to] : placed.rects)) out.light = true;
+        // By voice the mark waits for its sentence; typed, it is drawn as it comes.
+        this.d.send('guide:marks', { sessionId: s.id, sid: s.source === 'voice' && ev.sentence != null ? ev.sentence : null, marks: [out] });
+      }).catch((e) => { this.d.log('marks: ' + e.message); });
+    };
+    const take = (ev) => { if (ev.type === 'speech') speak(ev); else if (ev.type === 'mark') mark(ev); };
     let raw = null, err = null, streamed = false;
     this.modelsInFlight += 1;
     try {
-      raw = await withTimeout(llm.complete({ system: req.system, turns: [{ role: 'user', text: req.text }], imageDataUrl: cap.dataUrl, json: false, maxTokens: req.maxTokens, onDelta: (piece) => { streamed = true; for (const ev of rs.feed(piece)) speak(ev); } }), MODEL_TIMEOUT_MS, 'model');
+      raw = await withTimeout(llm.complete({ system: req.system, turns: [{ role: 'user', text: req.text }], imageDataUrl: cap.dataUrl, json: false, maxTokens: req.maxTokens, ...(pen && T.provider === 'publik' ? { model: PEN_PUBLIK_MODEL } : {}), onDelta: (piece) => { streamed = true; for (const ev of rs.feed(piece)) take(ev); } }), MODEL_TIMEOUT_MS, 'model');
     } catch (e) { err = e; } finally { this.modelsInFlight -= 1; }
+    // The walk is awaited even when the answer is not shown: one still queued
+    // in the probe would hold up the next thing asked of it.
+    if (listP) await listP;
     if (gen !== this.gen || s.epoch !== epoch) return;
     T.model = now() - t0;
     if (err) { this.d.log('answer failed: ' + err.message); this.explain(plainAskError(T.provider, err), { fail: true, provider: T.provider, err }); return; }
     // A brain that does not stream hands the whole reply back at the end.
-    if (!streamed && raw) rs.feed(String(raw));
-    for (const ev of rs.end()) speak(ev);
+    // Every sentence of it is taken, in order (before 0.1.38 only the last one
+    // reached the voice: the rest were dropped with feed's return value).
+    if (!streamed && raw) for (const ev of rs.feed(String(raw))) take(ev);
+    for (const ev of rs.end()) take(ev);
     if (said > 0) s.saidStep = epoch;
     const text = rs.spoken.join(' ').trim();
-    this.explain(text || 'I did not get an answer back. Try asking again.', { ms: answerMs(text), kicker: 'answer', end: 'answer' });
+    this.explain(text || 'I did not get an answer back. Try asking again.', { ms: answerMs(text) + (tally.asked ? MARKS_LINGER_MS : 0), kicker: 'answer', end: 'answer' });
+    if (!tally.asked) return;
+    // Once the marks are down: count them, and take them off when the screen
+    // under them moves (a scroll, another window), so none sits on the wrong thing.
+    chain.then(() => {
+      this.d.log('marks: drew ' + tally.drawn + ' of ' + tally.asked + (tally.sources.length ? ' (' + tally.sources.join(', ') + ')' : '') + (T.firstMark != null ? ', first at ' + T.firstMark + 'ms' : ''));
+      try { if (this.d.onMarks) this.d.onMarks({ session: s.id, asked: tally.asked, drawn: tally.drawn, dropped: tally.dropped, sources: tally.sources.slice(), missed: tally.missed.slice(), model: req.pen ? 'pen' : '', modelMs: T.model, firstMs: T.firstSpeech, provider: T.provider, app: s.app ? s.app.process : '' }); } catch (_) { /* counting never breaks an answer */ }
+      if (tally.drawn && gen === this.gen) this.watchMarks(gen, s.id);
+    });
+  }
+
+  // Is the screen bright where these rects are? From the picture already taken
+  // (brightness(cap, rect) -> 0..1). Not knowing is "dark": the white thread.
+  onLight(cap, rects) {
+    if (typeof this.d.brightness !== 'function') return false;
+    let sum = 0, n = 0;
+    for (const r of rects || []) {
+      let v = null;
+      try { v = this.d.brightness(cap, r); } catch (_) { v = null; }
+      if (Number.isFinite(v)) { sum += v; n += 1; }
+    }
+    return n > 0 && sum / n >= MARKS_LIGHT;
+  }
+
+  // A thing found on the screen with no model (src/guide/find.js): each place
+  // gets a ring (a frame when it is long), the Knot says one short line, and
+  // it is held and let go like an answer: Esc, the talk key, the timer, or the
+  // screen moving under it. rects are physical pixels on the captured display.
+  found(task, source, { rects, cap, line, askedAt } = {}) {
+    if (this.active() || !Array.isArray(rects) || !rects.length || !cap) return false;
+    const gen = ++this.gen;
+    const now = this.d.now();
+    this.session = { id: 'g' + now.toString(36), task: String(task || ''), source: source || 'typed', startedAt: now, askedAt: askedAt || now, clickAt: null, app: null, steps: [], target: null, hashes: null, unchanged: 0, replay: null, epoch: 1, seq: 0, prevTarget: null, plan: null, T: null, answer: 'find' };
+    const s = this.session;
+    s.T = this.newTiming('find');
+    this.d.log('found on the screen: ' + rects.length + ' place(s) for "' + s.task.slice(0, 60) + '"');
+    const win = (r) => physRectToWindow(r, this.d.winBounds(), this.d.screenToDip);
+    const marks = rects.slice(0, MAX_MARKS).map((r) => {
+      // frame: a whole item (a video with its picture) gets a frame, as a long line does.
+      const m = { shape: r.frame || r.w > cap.pxWidth * FOUND_FRAME_SHARE ? 'box' : 'circle', rects: [win({ x: r.x, y: r.y, w: r.w, h: r.h })], verified: true };
+      if (this.onLight(cap, [r])) m.light = true;
+      return m;
+    });
+    this.d.send('guide:marks', { sessionId: s.id, sid: null, marks });
+    this.explain(line || 'Here it is.', { ms: FOUND_MS, kicker: 'found', end: 'answer' });
+    try { if (this.d.onMarks) this.d.onMarks({ session: s.id, asked: marks.length, drawn: marks.length, dropped: 0, sources: marks.map(() => 'find'), provider: '', app: '' }); } catch (_) { /* counting never breaks it */ }
+    this.watchMarks(gen, s.id);
+    return true;
+  }
+
+  // Whether answers may draw on the screen (Settings, Draw on the screen).
+  drawOn() { try { return !!(this.d.drawOn && this.d.drawOn()); } catch (_) { return false; } }
+
+  // The marks stay while the answer is up and the screen holds still. A
+  // screen that has clearly moved takes them off: a ring left on whatever
+  // scrolled under it would be pointing at the wrong thing.
+  async watchMarks(gen, sessionId) {
+    const w = this.d.watcher;
+    if (!w || typeof w.grab !== 'function') return;
+    const live = () => gen === this.gen && this.state === 'explaining';
+    // The bubble and the last strokes are part of the picture to compare against.
+    await this.d.sleep(MARKS_SETTLE_MS);
+    let base = null;
+    while (live()) {
+      let frame = null;
+      try { frame = await w.grab(); } catch (_) { frame = null; }
+      if (!live()) return;
+      if (frame && !base) base = frame;
+      else if (frame && difference(base, frame) >= MARKS_MOVED) {
+        this.d.log('marks: the screen moved, taking them off');
+        this.d.send('guide:marks:clear', { sessionId, why: 'moved' });
+        return;
+      }
+      await this.d.sleep(MARKS_WATCH_MS);
+    }
   }
 
   // The model's raw reply -> what to do. { kind:'point', target, reply, plan } |
@@ -757,11 +930,12 @@ class GuideSession {
   // A sentence the model has finished writing for this step. By voice it is
   // spoken at once (sentence two queues behind sentence one in the renderer);
   // either way the first one shows by the Knot while the thread is still to come.
-  sayEarly(text, first, epoch) {
+  // sid: the sentence's number in an answer that draws, so a mark can wait for it.
+  sayEarly(text, first, epoch, sid) {
     const s = this.session;
     if (!s || s.epoch !== epoch) return;
     if (first) this.d.send('guide:hint', { text, ms: 9000 });
-    if (s.source === 'voice') this.d.send('guide:say', { text, first, sessionId: s.id, stream: 'guide:' + s.id });
+    if (s.source === 'voice') this.d.send('guide:say', Object.assign({ text, first, sessionId: s.id, stream: 'guide:' + s.id }, sid != null ? { sid } : {}));
   }
 
   // Whether this step's words have already been spoken as they streamed.

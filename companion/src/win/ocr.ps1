@@ -5,7 +5,10 @@
 # WinRT types this way.
 #   powershell.exe -NoProfile -ExecutionPolicy Bypass -File ocr.ps1 -Path <image>
 # stdout: the text, UTF-8. Exit 2 when no OCR language is installed.
-param([Parameter(Mandatory = $true)][string]$Path)
+# -Words: instead, the image size on the first row ("W H"), then one word per
+# row "x y w h word" in image pixels with a blank row between lines
+# (src/guide/marks.js draws on the screen from these).
+param([Parameter(Mandatory = $true)][string]$Path, [switch]$Words)
 $ErrorActionPreference = 'Stop'
 [Console]::OutputEncoding = [Text.Encoding]::UTF8
 Add-Type -AssemblyName System.Runtime.WindowsRuntime
@@ -27,5 +30,20 @@ $bitmap  = Await ($decoder.GetSoftwareBitmapAsync()) ([Windows.Graphics.Imaging.
 $engine  = [Windows.Media.Ocr.OcrEngine]::TryCreateFromUserProfileLanguages()
 if (-not $engine) { [Console]::Error.WriteLine('no OCR language installed'); exit 2 }
 $result  = Await ($engine.RecognizeAsync($bitmap)) ([Windows.Media.Ocr.OcrResult])
-[Console]::Out.Write($result.Text)
+if ($Words) {
+  $inv = [Globalization.CultureInfo]::InvariantCulture
+  $sb = New-Object System.Text.StringBuilder
+  [void]$sb.Append([int]$bitmap.PixelWidth).Append(' ').Append([int]$bitmap.PixelHeight).Append([char]10)
+  foreach ($line in $result.Lines) {
+    foreach ($w in $line.Words) {
+      $r = $w.BoundingRect
+      $word = ([string]$w.Text) -replace '\s+', ' '
+      [void]$sb.Append(([double]$r.X).ToString('0.#', $inv)).Append(' ').Append(([double]$r.Y).ToString('0.#', $inv)).Append(' ').Append(([double]$r.Width).ToString('0.#', $inv)).Append(' ').Append(([double]$r.Height).ToString('0.#', $inv)).Append(' ').Append($word).Append([char]10)
+    }
+    [void]$sb.Append([char]10)
+  }
+  [Console]::Out.Write($sb.ToString())
+} else {
+  [Console]::Out.Write($result.Text)
+}
 $stream.Dispose()

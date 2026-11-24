@@ -322,7 +322,8 @@ test('wiring: stats start before the door, the window reports screens, a test ru
   assert.match(main.slice(boot - 20, boot), /if \(!SMOKE\) $/);
   assert.match(main, /onScreen: gateCount\.screen, onPress: gateCount\.press/);
   assert.match(main, /gateCount\.passed\(signed && signed\.choice\)/);
-  assert.match(main, /const gateCount = SMOKE \? \{ screen\(\) \{\}, press\(\) \{\}, passed\(\) \{\} \}/);
+  // 0.1.40 added plan() and noKey() (own-key-0140.test.js); a test run still counts nothing.
+  assert.match(main, /const gateCount = SMOKE \? \{ screen\(\) \{\}, press\(\) \{\}, passed\(\) \{\}, plan\(\) \{\}, noKey\(\) \{\} \}/);
   assert.match(main, /publik\.setChoice\(String\(choice \|\| ''\)\); stats\.aiSource\(publik\.choice\(\)\)/);
   // The quit hold that carries signin_closed is the same one as before.
   assert.match(main, /stats\.stop\(SMOKE \? '' : exitReason \|\| 'other'\)\.catch\(\(\) => \{\}\)\.finally\(\(\) => app\.exit\(0\)\)/);

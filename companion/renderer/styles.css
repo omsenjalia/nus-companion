@@ -993,6 +993,38 @@ html:not(.standalone) [data-standalone-only]{display:none!important}
 @keyframes guideCircleDraw { to { stroke-dashoffset: 0; } }
 @media (prefers-reduced-motion: reduce) { .guide-circle ellipse { animation: none; stroke-dashoffset: 0; } }
 
+/* Marks: what an answer draws on the screen while it is spoken (marks.js).
+   The Knot's thread laid on the page: ink outline under a white core, drawn
+   on by its dash offset. Under the bubbles, over the strand, never the mouse. */
+#marks-layer { position: fixed; left: 0; top: 0; width: 100vw; height: 100vh; z-index: 2; pointer-events: none; overflow: visible; opacity: 1; transition: opacity 260ms ease; }
+#marks-layer.leaving { opacity: 0; }
+#marks-layer path { fill: none; stroke-linecap: round; stroke-linejoin: round; stroke-dasharray: 100 100; stroke-dashoffset: 100; animation: markDraw 500ms cubic-bezier(.3,.7,.2,1) forwards; }
+#marks-layer .mark-ink { stroke: rgb(13,15,25); stroke-width: 6.2; }
+#marks-layer .mark-core { stroke: #fff; stroke-width: 3.2; }
+#marks-layer .mark-underline .mark-ink { stroke-width: 5.6; }
+#marks-layer .mark-underline .mark-core { stroke-width: 2.8; }
+/* On a bright page the thread turns over: a dark line with a white edge. */
+#marks-layer .mark-on-light .mark-ink { stroke: #fff; }
+#marks-layer .mark-on-light .mark-core { stroke: rgb(13,15,25); }
+/* The red pen (a check of someone's work): the mistake in red with the fix
+   written beside it, a right part ticked in green. The ink outline keeps both
+   readable on a dark page, a white one on a bright page. */
+#marks-layer .mark-wrong .mark-core { stroke: #ff4d4f; }
+#marks-layer .mark-wrong.mark-on-light .mark-core { stroke: #d92d20; }
+#marks-layer .mark-right .mark-core { stroke: #34c77b; }
+#marks-layer .mark-right.mark-on-light .mark-core { stroke: #128a4b; }
+#marks-layer .mark-wrong.mark-on-light .mark-ink, #marks-layer .mark-right.mark-on-light .mark-ink { stroke: #fff; }
+#marks-layer .mark-wrong .mark-ink, #marks-layer .mark-right .mark-ink { stroke: rgb(13,15,25); }
+#marks-layer .mark-note { font-family: 'Ink Free', 'Segoe Print', 'Bradley Hand ITC', 'Comic Sans MS', cursive; font-weight: 700; fill: #ff4d4f; stroke: rgb(13,15,25); stroke-width: 4.5px; paint-order: stroke fill; stroke-linejoin: round; opacity: 0; animation: markNote 260ms ease-out forwards; }
+#marks-layer .mark-on-light .mark-note { fill: #d92d20; stroke: #fff; }
+#marks-layer text.mark-still { animation: none; opacity: 1; }
+@keyframes markNote { from { opacity: 0; } to { opacity: 1; } }
+/* A mark Windows could not confirm: lighter, it says "about here". */
+#marks-layer .mark-loose { opacity: .72; }
+#marks-layer path.mark-still { animation: none; stroke-dashoffset: 0; }
+@keyframes markDraw { to { stroke-dashoffset: 0; } }
+@media (prefers-reduced-motion: reduce) { #marks-layer path { animation: none; stroke-dashoffset: 0; } #marks-layer .mark-note { animation: none; opacity: 1; } }
+
 /* ============================== The tour ============================== */
 /* The first-run tour's sheet: the Knot's own card on its tail, wider than a
    bubble (renders-0115-2026-11-02, O1 direction B). It morphs from card to

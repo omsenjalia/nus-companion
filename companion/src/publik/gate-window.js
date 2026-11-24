@@ -30,7 +30,11 @@ const QUIET_RETRY_MS = 60_000, QUIET_STEP_MS = 5_000;
 // From 0.1.22 the window never shows an amount of money (publik's rule, developers page read
 // 2026-11-15): the balance is only ever said as a number of asks.
 const SCREEN_ASK_USD = 0.00043;
-const FREE_START_USD = 0.05;
+// 0.1.39: publik gives every new Nūs account $0.20 once at its first sign-in (2026-11-21). Until now a
+// new account read "About 450 asks on your publik balance" with "Starts Nūs." under Connect your plan,
+// which reads like paying; a third of new installs picked their own key instead. A balance up to the
+// grant is the free start: "for free. Nothing to buy." and "Free. Starts Nūs."
+const FREE_START_USD = 0.20;
 
 // The words, short and large (Pranav, 2026-11-11: "increase the font and the readability and make
 // it concise"). He picked A, with his own line, and then: the "no plan needed" message must not be
@@ -51,6 +55,11 @@ const UPDATING = 'Updating? Everything you set up is still here. To keep your ow
 const WAITING = { headline: 'Finish in your browser', line: 'Nūs comes back by itself once you\'re signed in.', callout: 'publik will show you a plan. You do not need to buy it.' };
 const CHOICE_LINE = 'With publik, your question and a picture of your screen go to publik\'s AI to answer. With your own key they go to your AI company, as before. Voice commands, reminders and your notes stay on this computer either way.';
 const NO_BALANCE_LINE = 'This publik account\'s free asks are used up.';
+// 0.1.40: "Use my own key" pressed while publik has free use for this account and no key is saved on
+// this computer. A third of new installs picked their own key and a third of those never got an answer
+// (read 2026-11-24, conditor/own-key-0140). Our lines only; the two buttons keep publik's own labels.
+const NO_KEY = { headline: 'No AI key on this computer yet', line: 'publik\'s free asks answer right now. You can switch to your own key any time, in Settings.' };
+const NO_KEY_CAPTIONS = { connect: 'Free. Starts Nūs.', own_key: 'Only if you have a key or Claude Code' };
 // publik's own offer (pricing page, read 2026-11-15): a 7-day free trial of its Basic plan for new
 // subscribers, with a card, paid when the week ends. Said in full so nobody is surprised by a charge.
 const FREE_WEEK_LINE = 'publik gives new subscribers a free week. It needs a card, and it is paid after the week unless you cancel.';
@@ -124,7 +133,15 @@ function view(screen, opts = {}) {
     const p = readPlan(screen);
     out.privacy = CHOICE_LINE;
     out.windowTitle = 'Nūs: you\'re in';
-    if (p.kind === 'none') {
+    if (opts.confirmOwnKey && p.kind !== 'none') {
+      out.state = 'no_key';
+      put({ headline: NO_KEY.headline, line: NO_KEY.line, callout: '', small: '' });
+      for (const b of out.buttons) {
+        if (b.action === 'connect') { b.primary = true; b.small = false; b.caption = NO_KEY_CAPTIONS.connect; }
+        if (b.action === 'own_key') { b.primary = false; b.small = true; b.caption = NO_KEY_CAPTIONS.own_key; }
+      }
+      out.buttons.sort((a, b) => Number(b.primary) - Number(a.primary));
+    } else if (p.kind === 'none') {
       out.state = 'no_balance';
       put({ headline: 'You\'re in', line: NO_BALANCE_LINE, callout: FREE_WEEK_LINE, small: '' });
       // No free use left: the own key is the free path, so it leads. The plan button says what
@@ -164,6 +181,8 @@ function createGateUI(opts = {}) {
   const { BrowserWindow, ipcMain, shell, app } = require('electron');
   const started = Date.now();
   let win = null, shown = false, pending = null, prevId = '', held = false, impatient = false;
+  // 0.1.40: the choose screen on the glass, and whether the no-key check was already shown for it.
+  let choosing = null, noKeyShown = false;
   const now = opts.now || Date.now;
   const sleep = opts.sleep || ((ms) => new Promise((r) => setTimeout(r, ms)));
   const log = (m) => { try { console.log('[gate] ' + m); } catch (_) { /* no console */ } };
@@ -206,9 +225,22 @@ function createGateUI(opts = {}) {
   const onPress = (event, action) => {
     if (!win || event.sender !== win.webContents || !pending) return;
     release();
+    // 0.1.40: own key with publik's free use waiting and no key on this computer: one check first,
+    // drawn in this window. A second press of the same button goes through as before.
+    if (action === 'own_key' && needsNoKeyCheck()) {
+      noKeyShown = true;
+      tell(opts.onNoKey, true);
+      try { win.webContents.send('publik-gate:screen', view(choosing, Object.assign({}, opts, { confirmOwnKey: true }))); } catch (_) { /* gone */ }
+      return;
+    }
     const p = pending; pending = null;
     if (p.buttons.includes(action)) { tell(opts.onPress, action); p.resolve(action); } else pending = p;
   };
+  function needsNoKeyCheck() {
+    if (!choosing || noKeyShown || typeof opts.hasOwnAnswer !== 'function') return false;
+    if (readPlan(choosing).kind === 'none') return false;
+    try { return !opts.hasOwnAnswer(); } catch (_) { return false; }
+  }
   const onTouch = (event) => { if (win && event.sender === win.webContents) release(); };
   // Nūs's own anonymous counts (opts.onScreen, opts.onPress): which screen is up and which
   // button was pressed. Nothing from publik travels with them, and they never hold the gate up.
@@ -225,6 +257,8 @@ function createGateUI(opts = {}) {
       }
       const w = ensureWindow();
       tell(opts.onScreen, statScreen(screen));
+      // 0.1.40: which kind of choose screen this account got: free use or a balance, a plan, or none left.
+      if (screen.id === 'choose') { if (!choosing) tell(opts.onPlan, readPlan(screen).kind); choosing = screen; } else choosing = null;
       const forward = comesForward(prevId, screen);
       prevId = screen.id;
       // Came forward by itself: no button is focused and keys are ignored for a moment, so a key
@@ -250,4 +284,4 @@ function createGateUI(opts = {}) {
   };
 }
 
-module.exports = { createGateUI, view, statScreen, readPlan, asksFor, comesForward, noAnswer, NOT_REACHABLE, WORDING, WORDING_PICK, PLAN_LINE, STEPS, INTRO, UPDATING, WAITING, CHOICE_LINE, NO_BALANCE_LINE, FREE_WEEK_LINE, FREE_WEEK_CAPTION, WAITING_LINES, NO_BALANCE_LINES };
+module.exports = { NO_KEY, NO_KEY_CAPTIONS, createGateUI, view, statScreen, readPlan, asksFor, comesForward, noAnswer, NOT_REACHABLE, WORDING, WORDING_PICK, PLAN_LINE, STEPS, INTRO, UPDATING, WAITING, CHOICE_LINE, NO_BALANCE_LINE, FREE_WEEK_LINE, FREE_WEEK_CAPTION, WAITING_LINES, NO_BALANCE_LINES };

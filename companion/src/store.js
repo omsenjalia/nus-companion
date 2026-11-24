@@ -70,6 +70,10 @@ const DEFAULTS = {
   channelMessages: true,
   // Short tonal cues (acknowledge, done, error, sleep). Never while the mic is live.
   sounds: true,
+  // Draw on the screen (0.1.38, companion/src/guide/marks.js): an answer about
+  // the screen underlines, circles and frames what it is talking about, on the
+  // words and controls Windows itself reports. Off, answers are words only.
+  drawOnScreen: true,
   // Anonymous usage stats (companion/src/stats.js, contract in the vault's
   // growth-os/TELEMETRY-CONTRACT.md). Default on; the Settings switch turns it
   // off, which sends one stats_off and then nothing. Never coursework or text.

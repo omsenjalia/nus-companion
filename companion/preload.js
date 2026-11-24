@@ -60,7 +60,7 @@ contextBridge.exposeInMainWorld('nus', {
   assignmentBench: (payload) => ipcRenderer.invoke('companion:assignment:bench', payload),
   on: (channel, cb) => {
     const allowed = ['mouse:forced', 'capture:state', 'llm:start', 'llm:token', 'llm:done', 'llm:error', 'llm:busy', 'status', 'transcript', 'spar:state', 'cursor:probe', 'touchpad:event', 'knot:set', 'tour:start', 'daily:line', 'capture:limit', 'cursor:away',
-      'assignment:takeover', 'assignment:paint', 'assignment:voice', 'guide:state', 'guide:target', 'guide:update', 'guide:retract', 'guide:bubble', 'guide:done', 'guide:hint', 'guide:say', 'guide:circle', 'voice:state', 'voice:hush', 'knot:corner', 'knot:pos', 'knot:move', 'knot:size', 'knot:island', 'hands:state', 'tasks:event', 'tasks:windows', 'tour:card', 'tour:update', 'tour:end', 'knot:backdrop', 'power:state', 'ptt:state', 'settings:changed', 'capture:policy', 'focus:guard', 'play:start', 'quick:open'];
+      'assignment:takeover', 'assignment:paint', 'assignment:voice', 'guide:state', 'guide:target', 'guide:update', 'guide:retract', 'guide:bubble', 'guide:done', 'guide:hint', 'guide:say', 'guide:circle', 'guide:marks', 'guide:marks:clear', 'voice:state', 'voice:hush', 'knot:corner', 'knot:pos', 'knot:move', 'knot:size', 'knot:island', 'hands:state', 'tasks:event', 'tasks:windows', 'tour:card', 'tour:update', 'tour:end', 'knot:backdrop', 'power:state', 'ptt:state', 'settings:changed', 'capture:policy', 'focus:guard', 'play:start', 'quick:open'];
     if (!allowed.includes(channel)) return;
     ipcRenderer.on(channel, (_e, data) => cb(data));
   }

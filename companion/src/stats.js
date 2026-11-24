@@ -49,7 +49,11 @@ const STEPS = ['welcome_seen', 'stats_notice_seen', 'key_prompt_seen', 'key_skip
   'tour_voice', 'tour_mic', 'tour_key', 'tour_questions', 'tour_home', 'tour_sharing', 'tour_ai', 'tour_guide', 'tour_hands',
   'tour_dashboard', 'tour_done', 'tour_skipped', 'struggle_picked', 'autostart_on', 'autostart_off',
   // 0.1.37: the dictation card after the talk key's card (seventh edition on the server).
-  'tour_dictate'];
+  'tour_dictate',
+  // 0.1.40 (ninth edition): the choose screen publik showed (free use or a balance, a plan, none left),
+  // the no-key check before "Use my own key", the tour's AI card first when nothing can answer, and
+  // its "Get a free key" button.
+  'door_balance', 'door_plan', 'door_empty', 'door_nokey_seen', 'tour_ai_first', 'tour_get_key'];
 // Amendment (e), 2026-11-06: the honest retention ladder. Each list is fixed;
 // anything else is dropped before the send.
 // hook: which retention loop was put in front of the person, or taken up.

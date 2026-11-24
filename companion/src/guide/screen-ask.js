@@ -23,6 +23,8 @@ function normalize(text) {
   return String(text || '')
     .replace(/[’‘]/g, "'")
     .replace(SUMMARIZE_SPELLINGS, 'summarize')
+    // "Great this." is how the speech model wrote "Grade this" (live 2026-11-23, twice).
+    .replace(/^(\s*(?:(?:ok|okay|so|please|hey|nus)[\s,]+)*)great (this|it|that|my [\w']+)\b/i, '$1grade $2')
     .replace(/\bwaht\b/gi, 'what').replace(/\bwhats\b/gi, "what's").replace(/\bthats\b/gi, "that's")
     .replace(/\b(?:rn|pls|plz)\b/gi, '')
     .replace(/\bu\b/gi, 'you')
@@ -51,8 +53,14 @@ const RULES = [
   // read it out
   ['read', new RegExp(LEAD + "(?:read(?: out)?|read aloud)\\b(?! (?:up|about) )", 'i'), true],
   // explain / describe / translate
-  ['explain', new RegExp(LEAD + "(?:explain|break down|translate|clarify)\\b", 'i'), false],
+  // ("Explained this error." is how the speech model wrote "Explain this error", live 2026-11-23.)
+  ['explain', new RegExp(LEAD + "(?:explain(?:ed)?|break down|translate|clarify)\\b", 'i'), false],
   ['describe', new RegExp(LEAD + "(?:describe|tell me (?:about|what)|talk me through what)\\b", 'i'), false],
+  // check my work (the red pen, src/guide/marks.js PEN_RULES): the work on the
+  // screen is named, or it is "this" and nothing else is asked. "Check my
+  // email", "check the weather", "mark this as done" are not this.
+  ['check', new RegExp(LEAD + "(?:(?:double[- ]?)?check|grade|mark|correct|proof ?read|red[- ]?pen|go over|look over|review)\\s+(?:(?:my|this|the|these|that)\\s+(?:[\\w']+\\s+)?(?:work|working|answers?|math|maths|homework|essay|paragraph|code|solution|proof|steps|calculations?|equations?|spelling|grammar|writing|assignment|problem|sums?|totals?|numbers|draft|paper|response|sentences?|logic|formulas?|query|sql|function|script|translation)|(?:this|it|that|these)(?:\\s+over)?)(?:\\s+(?:for me|please|for (?:mistakes|errors|typos)|real quick|quickly))*[\\s.!?]*$", 'i'), 'whole'],
+  ['check', new RegExp(LEAD + "(?:what did i (?:get|do) wrong|where did i (?:go|mess up|get it) ?(?:wrong)?|what(?:'s| is) wrong (?:with (?:this|my [\\w']+)|here)|did i (?:get|do) (?:this|it|that|these) (?:right|wrong|correctly)|(?:are there |any )(?:mistakes|errors|typos)(?: (?:here|in (?:this|my [\\w']+)))?|(?:find|spot|show me|where(?:'s| is| are)) (?:my|the|any) (?:mistakes?|errors?|typos?))[\\s.!?]*$", 'i'), 'whole'],
   // is this right
   // (The whole ask is the check, and it names what it checks: "is it true that
   // cats ..." runs on past the adjective and is a general question.)
@@ -67,6 +75,8 @@ function screenAsk(text) {
   const raw = String(text || '').trim();
   if (!raw || raw.length > 220) return null;
   const t = normalize(raw);
+  // A check of their work is asked in "where" words too ("where did I go wrong", "where's my mistake").
+  for (const [mode, re, itCounts] of RULES) { if (mode === 'check' && itCounts === 'whole' && re.test(t)) return { mode, page: false }; }
   if (HOW_WHERE.test(t) || THEN_ACT.test(t)) return null;
   // The window's own words: the old page rules still decide first.
   const pg = readsPage(t);

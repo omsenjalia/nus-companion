@@ -55,6 +55,7 @@ const { readExportZip, importedLine } = require('./src/recall/ingest');
 const { needsScreen, isTask, carriesText, handsTakes, launchClause, rewriteAsk, readsPage, greeting, messageAsk, bareLaunch, fieldFollowUp, endsMidPhrase, trimCutOff } = require('./src/reflex/rules');
 const { buildPageAsk, preparePage } = require('./src/page-read');
 const { screenAsk, vagueAsk, CLARIFY_LINE } = require('./src/guide/screen-ask');
+const { findAsk, locate, growToItem, foundLine } = require('./src/guide/find');
 const { rewriteInPlace } = require('./src/rewrite');
 const { parseReminder, createReminders, whenLabel, durationWords, describeList, panelRows: reminderRows } = require('./src/reminders');
 const { tellText, thanksText } = require('./src/feedback');
@@ -89,7 +90,7 @@ app.on('before-quit', () => assignmentCapturer.close());
 app.whenReady().then(() => assignmentCapturer.start());
 const { grayCells } = require('./src/guide/solve');
 const { createProblemGate } = require('./src/guide/problemgate');
-const { ocrJpeg } = require('./src/win/ocr');
+const { ocrJpeg, ocrWords } = require('./src/win/ocr');
 const http = require('http');
 const https = require('https');
 const { URL, pathToFileURL } = require('url');
@@ -3410,6 +3411,115 @@ async function guideCapture() {
   if (err) throw err;
   return cap;
 }
+// The words on the screen and where each one is, for marks drawn on it
+// (src/guide/marks.js). Windows reads small text badly off the model's 1568 px
+// picture, so the display is grabbed once more at up to DRAW_OCR_MAXSIDE for
+// this, in the capture worker, beside the model call. The model's own picture
+// is the fallback.
+const DRAW_OCR_MAXSIDE = Number(process.env.NUS_DRAW_OCR_MAXSIDE) || 3200;
+async function guideWords(cap) {
+  let jpeg = cap && cap.jpeg;
+  try {
+    const sharp = await assignmentCapturer.captureModel(store.getSettings().knotDisplayId, { maxSide: DRAW_OCR_MAXSIDE, quality: 85, enlarge: 1.5, masks: overlayMasks() });
+    if (sharp && sharp.jpeg) jpeg = sharp.jpeg;
+  } catch (e) { console.log('[guide] marks: sharp capture failed, reading the model picture:', e.message); }
+  if (!jpeg) throw new Error('no picture to read');
+  const t0 = Date.now();
+  const words = await ocrWords(jpeg, capturesDir(), probe);
+  console.log('[guide] marks: ' + words.lines.length + ' lines of words read in ' + (Date.now() - t0) + 'ms (' + words.width + 'x' + words.height + ')');
+  return words;
+}
+// Find on the screen (src/guide/find.js): the ask's words are looked for among
+// the words Windows reads off the screen, before the reflex layer, Hands or a
+// model see them. -> true when the thing was there and is now ringed. One
+// capture and one word read, about half a second; false costs the ask that
+// and nothing else, and it then routes exactly as it did before.
+async function findOnScreen(text, source, heardAt) {
+  const ask = findAsk(text);
+  if (!ask) return false;
+  const g = getGuide();
+  if (!g.drawOn()) return false;
+  if ((agent && agent.active()) || (assignment && assignment.isOn())) return false;
+  // A walkthrough in progress keeps its ask; an answer that is only being read gives way.
+  if (g.active() && g.status().state !== 'explaining') return false;
+  const t0 = Date.now();
+  let cap = null, words = null;
+  try {
+    // Our own window in front would be read instead of the app: step back first.
+    if (source === 'typed' && win && !win.isDestroyed() && win.isFocused()) { try { win.blur(); } catch (_) { /* gone */ } }
+    cap = await guideCapture();
+    words = cap ? await guideWords(cap) : null;
+  } catch (e) { routeLog('find: could not read the screen (' + String(e.message || e).slice(0, 80) + '), routing on'); return false; }
+  if (!cap || !words || !cap.display) return false;
+  const hits = locate(ask, words);
+  if (!hits.length) { routeLog('find: "' + ask.phrase.slice(0, 60) + '" is not on the screen (' + (Date.now() - t0) + ' ms), routing on'); return false; }
+  const origin = screen.dipToScreenPoint({ x: cap.display.bounds.x, y: cap.display.bounds.y });
+  const fx = cap.pxWidth / words.width, fy = cap.pxHeight / words.height;
+  const toPhys = (r) => ({ x: Math.round(origin.x + r.x * fx), y: Math.round(origin.y + r.y * fy), w: Math.max(1, Math.round(r.w * fx)), h: Math.max(1, Math.round(r.h * fy)) });
+  // Asked for by its kind ("the Mourinho video"): the whole thing is framed,
+  // its picture and its words, found by looking up from the words in the
+  // screenshot already taken. No picture there: the words' own block.
+  let whole = 0;
+  let pixels = null;
+  if (ask.item && cap.image) { try { const sz = cap.image.getSize(); pixels = { buf: cap.image.toBitmap(), w: sz.width, h: sz.height, k: sz.width / words.width }; } catch (_) { pixels = null; } }
+  const rects = hits.map((h) => {
+    if (!ask.item) return toPhys(h.rect);
+    let item = null;
+    if (pixels) {
+      const k = pixels.k, b = { x: h.block.x * k, y: h.block.y * k, w: h.block.w * k, h: h.block.h * k };
+      const grown = growToItem(pixels.buf, pixels.w, pixels.h, b, h.lineHeight * k);
+      if (grown) item = { x: grown.x / k, y: grown.y / k, w: grown.w / k, h: grown.h / k };
+    }
+    if (item) whole += 1;
+    return Object.assign(toPhys(item || h.block), { frame: true });
+  });
+  // NUS_GUIDE_DEBUG=1: what this find saw, kept beside the other guide logs (the picture never leaves this computer).
+  if (process.env.NUS_GUIDE_DEBUG === '1') {
+    try {
+      const dbg = path.join(app.getPath('userData'), 'companion', 'debug');
+      fs.mkdirSync(dbg, { recursive: true });
+      if (cap.jpeg) fs.writeFileSync(path.join(dbg, 'find-last.jpg'), cap.jpeg);
+      fs.writeFileSync(path.join(dbg, 'find-last.json'), JSON.stringify({ ask, words: { width: words.width, height: words.height }, picture: pixels ? { w: pixels.w, h: pixels.h, k: pixels.k, bytes: pixels.buf.length } : null, hits: hits.map((h) => ({ rect: h.rect, block: h.block, lineHeight: h.lineHeight, text: h.text })), rects }));
+    } catch (_) { /* a debug file never breaks a find */ }
+  }
+  if (g.active()) g.dismiss('find');
+  routeLog('-> found on the screen: "' + ask.phrase.slice(0, 60) + '" at "' + hits[0].text.slice(0, 60) + '"' + (hits.length > 1 ? ' and ' + (hits.length - 1) + ' more' : '') + ' (' + hits[0].matched + ' of ' + hits[0].of + ' words' + (ask.item ? ', ' + whole + ' with its picture' : '') + ', ' + (Date.now() - t0) + ' ms)');
+  if (!g.found(text, source === 'typed' ? 'typed' : 'voice', { rects, cap, line: foundLine(hits), askedAt: heardAt })) return false;
+  noteAsk(askModeFor(source), 'guide'); noteWin('guide');
+  return true;
+}
+// A dev run only (never a packaged build): NUS_DRAW_FAKE_REPLY names a text
+// file that is streamed back as the brain's reply to a guide ask, so the whole
+// drawing path (the capture, the control walk, the word read, the placing, the
+// overlay) can be checked on a real screen with no model and no balance.
+function drawFakeBrain() {
+  if (app.isPackaged || !process.env.NUS_DRAW_FAKE_REPLY) return null;
+  return { ready: true, provider: 'fake', complete: async (req) => {
+    const text = fs.readFileSync(process.env.NUS_DRAW_FAKE_REPLY, 'utf8').trim();
+    for (const piece of text.match(/[\s\S]{1,12}/g) || []) { if (req.onDelta) req.onDelta(piece); await new Promise((r) => setTimeout(r, 30)); }
+    return text;
+  } };
+}
+// How bright the screen is under a mark (0..1), read off the picture the model
+// was sent, so a mark on a white page is a dark line and one on a dark page a
+// white one. rect is in physical pixels. null when it cannot be told.
+function captureBrightness(cap, rect) {
+  try {
+    const img = cap && (cap.image || (cap.dataUrl ? nativeImage.createFromDataURL(cap.dataUrl) : null));
+    if (!img || !rect || !cap.display) return null;
+    const size = img.getSize();
+    const origin = screen.dipToScreenPoint({ x: cap.display.bounds.x, y: cap.display.bounds.y });
+    const fx = size.width / cap.pxWidth, fy = size.height / cap.pxHeight;
+    const x = Math.max(0, Math.floor((rect.x - origin.x) * fx) - 3), y = Math.max(0, Math.floor((rect.y - origin.y) * fy) - 3);
+    const width = Math.min(size.width - x, Math.ceil(rect.w * fx) + 6), height = Math.min(size.height - y, Math.ceil(rect.h * fy) + 6);
+    if (width < 2 || height < 2) return null;
+    const buf = img.crop({ x, y, width, height }).resize({ width: 16, height: 8, quality: 'good' }).toBitmap();
+    if (!buf.length) return null;
+    let sum = 0;
+    for (let i = 0; i < buf.length; i += 4) sum += 0.114 * buf[i] + 0.587 * buf[i + 1] + 0.299 * buf[i + 2];
+    return sum / (buf.length / 4) / 255;
+  } catch (_) { return null; }
+}
 function guideDebugLog(file, rec) {
   if (process.env.NUS_GUIDE_DEBUG !== '1') return;
   try {
@@ -3453,8 +3563,34 @@ function getGuide() {
     // overrides. (2026-09-15, Pranav: "why is it guestimating".)
     capture: guideCapture,
     watcher: getGuideWatcher(),
+    // Drawing on the screen (src/guide/marks.js): an answer about the screen
+    // marks what it talks about. Settings, Draw on the screen; NUS_DRAW=0 is
+    // the switch for a bench run. Windows only for now: the words and their
+    // places come from Windows OCR, and a Mac answer would pay for the rules
+    // and draw almost nothing.
+    drawOn: () => process.platform === 'win32' && process.env.NUS_DRAW !== '0' && store.getSettings().drawOnScreen !== false,
+    readWords: guideWords,
+    brightness: captureBrightness,
+    // The front window's own words (uia.text, never a password field), for a
+    // drawing answer about the whole page. null when the window gives none.
+    pageText: async (fg) => {
+      if (!probeReady() || !fg || !fg.hwnd) return null;
+      const r = await probe.request('uia.text', { hwnd: fg.hwnd, ignorePid: process.pid, max: 200000, budgetMs: 1200 }, 3000).catch(() => null);
+      const page = r ? preparePage(r.text) : null;
+      routeLog('page words for the answer: ' + (page ? page.chars + ' chars' + (page.cut ? ', ' + page.cut + ' cut from the middle' : '') + ' (' + r.ms + ' ms)' : 'none'));
+      return page ? page.text : null;
+    },
+    // How many marks an answer asked for and how many could be placed: a row
+    // in this machine's usage ledger, and in the debug log when asked.
+    onMarks: (rec) => {
+      guideDebugLog('marks.jsonl', Object.assign({ at: Date.now() }, rec));
+      // What an answer drew and what it could not place, in the route log (words quoted off the
+      // screen, on this computer only, like the asks beside them).
+      routeLog('marks: ' + rec.drawn + ' of ' + rec.asked + ' drawn' + (rec.model ? ' (' + rec.model + ')' : '') + (rec.firstMs != null ? ', first word ' + rec.firstMs + ' ms, done ' + rec.modelMs + ' ms' : '') + (rec.missed && rec.missed.length ? ', not placed: ' + rec.missed.join('; ') : ''));
+      getLedger().record({ feature: 'draw', provider: rec.provider, outcome: rec.drawn ? 'ok' : 'none', ms: 0, note: rec.drawn + ' of ' + rec.asked + ' marks' + (rec.sources.length ? ' (' + rec.sources.join(', ') + ')' : '') + ' in ' + (rec.app || '') });
+    },
     get probe() { return probe; },
-    llm: () => guideLlm(),
+    llm: () => drawFakeBrain() || guideLlm(),
     send,
     screenToDip: (pt) => screenPoints().screenToDip(pt),
     dipToScreen: (pt) => screenPoints().dipToScreen(pt),
@@ -4298,7 +4434,7 @@ function tourAskAi() {
   const T = tour;
   Promise.resolve().then(() => hooks.tourAi()).then((r) => {
     if (!r || tour !== T) return;
-    T.caps.cli = !!r.cli; T.caps.keyReady = !!r.key; T.caps.publik = !!r.publik; T.caps.source = !!(r.cli || r.key);
+    T.caps.cli = !!r.cli; T.caps.keyReady = !!r.key; T.caps.publik = !!r.publik; T.caps.source = !!(r.cli || r.key); T.caps.aiKnown = true;
   }).catch((e) => routeLog('tour: ai status: ' + e.message));
 }
 function tourPublicState() {
@@ -4594,9 +4730,20 @@ function tourAction(action, text) {
   if (action === 'tour-home-island' && tour.step === S.home) { tourHome(true); return; }
   if (action === 'tour-sharing' && tour.step === S.sharing) { tourSharing(); return; }
   if (action === 'tour-key' && tour.step === S.ai) { tourKey(text).catch((e) => routeLog('tour key: ' + e.message)); return; }
+  // 0.1.40: AI Studio's key page in the browser; the card waits for the paste.
+  if (action === 'tour-get-key' && tour.step === S.ai) { noteStep('tour_get_key'); shell.openExternal('https://aistudio.google.com/apikey').catch(() => {}); send('tour:update', { status: Tour.GET_KEY_LINE }); return; }
   if (action === 'tour-show' && tour.step === S.guide) { tourGuideDemo().catch((e) => { routeLog('tour guide demo: ' + e.message); send('tour:update', { tucked: false, status: 'I could not open the dashboard.', actions: Tour.continueActions(false) }); }); return; }
   if (action === 'tour-hands-yes' && tour.step === S.hands) { tourHandsDemo().catch((e) => { routeLog('tour hands demo: ' + e.message); send('hands:state', { active: false, waiting: false }); send('tour:update', { tucked: false, status: 'That did not work here.', actions: Tour.continueActions(false) }); }); return; }
   if (action === 'tour-hands-no' && tour.step === S.hands) { send('hands:state', { active: false, waiting: false }); send('tour:update', { tucked: false, status: 'Another time.', actions: Tour.continueActions(false) }); tourSay('Another time.'); return; }
+}
+// 0.1.40: where the tour goes next. With nothing to answer (Tour.aiFirst), the AI card comes right
+// after the hello, then the tour picks up at card 1 and does not show the AI card again.
+function tourNextStep() {
+  const S = Tour.STEP;
+  if (tour.step === S.hello && !tour.aiFirstShown && Tour.aiFirst(tour.caps)) { tour.aiFirstShown = true; tour.aiFirstBack = true; noteStep('tour_ai_first'); return S.ai; }
+  if (tour.step === S.ai && tour.aiFirstBack) { tour.aiFirstBack = false; return S.mic; }
+  const next = tour.step + 1;
+  return next === S.ai && tour.aiFirstShown ? next + 1 : next;
 }
 function tourNext() {
   if (!tour) return;
@@ -4607,7 +4754,7 @@ function tourNext() {
   // A demo's thread winds back as the next card comes; the sheet is already up.
   if (guide && guide.active()) guide.dismiss('tour');
   else if (tour.shown) send('guide:done', { sessionId: null });
-  tour.step += 1;
+  tour.step = tourNextStep();
   // The Mac beta skips the cards for what it does not have: the microphone check when it cannot
   // hear words, and Hands. The step numbers stay the same so Windows is untouched.
   while (tour.step < Tour.OF && Tour.skipStep(tour.step, tour.caps)) tour.step += 1;
@@ -4788,6 +4935,10 @@ async function routeUtterance(text, source, heard, uttId, assignmentAlreadyCheck
   // "Circle it" while a walkthrough points at a control: a ring around it.
   // Otherwise the words route as usual ("highlight that" can be a Hands ask).
   if (CIRCLE_IT.test(String(text).trim()) && guidePointing()) { routeLog('-> circle the pointed control'); sayAck('sure', source, heardAt); send('guide:circle', {}); return; }
+  // "Where is the Mourinho video", "find me the late policy", "circle the
+  // total": looked for on the screen first (src/guide/find.js). There: ringed
+  // at once, no model, nothing spent. Not there: the ask goes on as before.
+  if (await findOnScreen(text, source, heardAt)) return;
   // Asks with their own path (rewrite the selection) skip the reflex layer,
   // whose "write ..." rule would type the words out instead.
   if (ownPath(text)) { routeUtteranceSlow(text, source, heardAt); return; }
@@ -4934,6 +5085,12 @@ function routeUtteranceSlow(text, source, heardAt) {
     const by = source === 'typed' ? 'typed' : 'voice';
     sayAck('reading', source, heardAt);
     if (pg.page === false) { routeLog('-> screen answer (' + pg.mode + '): "' + kind.text.slice(0, 80) + '"'); getGuide().start(kind.text, by, { askedAt: heardAt, answer: pg.mode }); return; }
+    // Drawing on (0.1.38): a summary or a question about the page is answered
+    // from the screenshot as well, so it can mark what it talks about; the
+    // window's own words go with it, so nothing past the screen is lost.
+    // Reading a page out stays as it was. Live 2026-11-23: "What's the main
+    // point of this?" took the words-only path and drew nothing.
+    if (pg.mode !== 'read' && getGuide().drawOn()) { routeLog('-> screen answer with the page words (' + pg.mode + '): "' + kind.text.slice(0, 80) + '"'); getGuide().start(kind.text, by, { askedAt: heardAt, answer: pg.mode, page: true }); return; }
     routeLog('-> page (' + pg.mode + '): "' + kind.text.slice(0, 80) + '"');
     answerPage(pg, kind.text, source, heardAt)
       .catch((e) => { console.log('[page] ' + e.message); return false; })

@@ -409,7 +409,41 @@
     speechSynthesis.speak(u);
   }
 
+  // ---- marks: what an answer draws on the screen (marks.js, 0.1.38) --------
+  // Main places each mark and sends its rectangle. By voice a mark carries the
+  // number of the sentence it belongs to and waits here until that sentence
+  // starts to play; typed, or once its sentence has begun, it is drawn at once.
+  const marksLayer = typeof window !== 'undefined' && window.NusMarks ? window.NusMarks.createLayer(document, { reduced: () => !!(window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches) }) : null;
+  const marksWaiting = new Map();   // sentence key -> marks waiting for it to be spoken
+  const sayWaiting = new Set();     // sentence keys queued for the voice, not yet started
+  const markRect = (r) => { const z = Math.pow(1.2, (nus.getZoomLevel && nus.getZoomLevel()) || 0); return r ? { x: r.x / z, y: r.y / z, w: r.w / z, h: r.h / z } : null; };
+  function drawMarks(list) {
+    if (!marksLayer) return;
+    for (const m of list || []) {
+      if (!m) continue;
+      marksLayer.draw(m.shape === 'arrow' ? { shape: 'arrow', from: markRect(m.from), to: markRect(m.to), verified: m.verified, light: !!m.light, bow: m.bow } : { shape: m.shape, rects: (m.rects || []).map(markRect), verified: m.verified, light: !!m.light, fix: m.fix, above: !!m.above });
+    }
+  }
+  // A sentence began to play (or will never be played): its marks go down now.
+  function sentenceStarted(key) {
+    if (key == null) return;
+    sayWaiting.delete(key);
+    const waiting = marksWaiting.get(key);
+    if (waiting) { marksWaiting.delete(key); drawMarks(waiting); }
+  }
+  // The voice was cut off: what was waiting for a sentence is drawn without it.
+  function releaseMarks() { sayWaiting.clear(); for (const list of marksWaiting.values()) drawMarks(list); marksWaiting.clear(); }
+  function clearMarks(fast) { sayWaiting.clear(); marksWaiting.clear(); if (marksLayer) marksLayer.clear(!!fast); }
+  nus.on('guide:marks', (p) => {
+    if (!p || !Array.isArray(p.marks) || !p.marks.length) return;
+    const key = p.sid != null ? String(p.sessionId || '') + ':' + p.sid : null;
+    if (key == null || !sayWaiting.has(key)) { drawMarks(p.marks); return; }
+    marksWaiting.set(key, (marksWaiting.get(key) || []).concat(p.marks));
+  });
+  nus.on('guide:marks:clear', () => clearMarks(false));
+
   function stopSpeaking() {
+    releaseMarks();
     sayQueue.length = 0; sayBusy = false; voiceGen++;
     try { speechSynthesis.cancel(); } catch (_) {}
     if (voiceSource) { try { voiceSource.stop(); } catch (_) {} voiceSource = null; }
@@ -448,7 +482,9 @@
     sayBusy = true;
     speechSynthesis.speak(u);
   }
-  function playPcm(audio, gen) {
+  // sid: the sentence this audio is, so its marks are drawn as it starts.
+  function playPcm(audio, gen, sid) {
+    sentenceStarted(sid);
     // No pinned rate: the buffer carries its own and Web Audio resamples it.
     // A context closed by a dead audio service is replaced, not reused.
     if (!voiceCtx || voiceCtx.state === 'closed') voiceCtx = new AudioContext();
@@ -474,12 +510,12 @@
       if (item.own) {
         const gen = voiceGen;
         // Already made (it was queued while the line before it played), or make it now.
-        (item.audio ? Promise.resolve(item.audio) : item.promise || nus.voiceSay(item.line)).then((audio) => { if (gen !== voiceGen) { sayBusy = false; sayNext(); return; } if (!audio) throw new Error('no audio'); if (item.first) vlog('voice: said in Fable: "' + item.line.slice(0, 40) + '"'); playPcm(audio, gen); }).catch(() => { if (gen !== voiceGen) { sayBusy = false; sayNext(); return; } if (item.first) vlog('voice: said in the Windows voice (Fable failed): "' + item.line.slice(0, 40) + '"'); speakSystem(item.line); });
+        (item.audio ? Promise.resolve(item.audio) : item.promise || nus.voiceSay(item.line)).then((audio) => { if (gen !== voiceGen) { sayBusy = false; sayNext(); return; } if (!audio) throw new Error('no audio'); if (item.first) vlog('voice: said in Fable: "' + item.line.slice(0, 40) + '"'); playPcm(audio, gen, item.sid); }).catch(() => { if (gen !== voiceGen) { sayBusy = false; sayNext(); return; } if (item.first) vlog('voice: said in the Windows voice (Fable failed): "' + item.line.slice(0, 40) + '"'); sentenceStarted(item.sid); speakSystem(item.line); });
         // Make the next line ahead while this one plays.
         const next = sayQueue[0];
         if (next && next.own && !next.promise) next.promise = nus.voiceSay(next.line).then((a) => { next.audio = a; return a; });
-      } else { if (item.first) vlog('voice: said in the Windows voice (' + (ownVoice && ownVoice.installed ? 'Fable not ready' : 'Fable not installed') + '): "' + item.line.slice(0, 40) + '"'); speakSystem(item.line); }
-    } catch (_) { sayBusy = false; }
+      } else { if (item.first) vlog('voice: said in the Windows voice (' + (ownVoice && ownVoice.installed ? 'Fable not ready' : 'Fable not installed') + '): "' + item.line.slice(0, 40) + '"'); sentenceStarted(item.sid); speakSystem(item.line); }
+    } catch (_) { sayBusy = false; sentenceStarted(item.sid); }
   }
   // The acknowledgement ("On it.") is said the moment main knows the ask; the
   // reply that follows a beat later queues behind it instead of cutting it
@@ -497,11 +533,13 @@
     if (!line.trim()) return;
     if (opts && opts.ack) ackHoldUntil = Date.now() + ACK_HOLD_MS;
     else if (restart && Date.now() < ackHoldUntil) { restart = false; ackHoldUntil = 0; }
-    if (restart) { sayQueue.length = 0; sayBusy = false; voiceGen++; try { speechSynthesis.cancel(); } catch (_) {} if (voiceSource) { try { voiceSource.stop(); } catch (_) {} voiceSource = null; } if (nus.voiceStop) nus.voiceStop(); }
+    // A new step's first line: marks still waiting on the old lines belong to nothing now.
+    if (restart) { sayWaiting.clear(); marksWaiting.clear(); sayQueue.length = 0; sayBusy = false; voiceGen++; try { speechSynthesis.cancel(); } catch (_) {} if (voiceSource) { try { voiceSource.stop(); } catch (_) {} voiceSource = null; } if (nus.voiceStop) nus.voiceStop(); }
     // A ready-made line plays in the Knot's voice even while the model is
     // still loading: it is a file, not a synthesis.
     const own = Boolean(nus.voiceSay && ownVoice && (ownVoice.ready || (opts && opts.cached && ownVoice.installed)));
-    const item = { line, own, first };
+    const item = { line, own, first, sid: opts && opts.sid != null ? opts.sid : null };
+    if (item.sid != null) sayWaiting.add(item.sid);
     if (own) item.promise = nus.voiceSay(line).then((a) => { item.audio = a; return a; });
     sayQueue.push(item);
     sayNext();
@@ -941,6 +979,8 @@
     tourPtt(pttHeld);
     if (islandOn) syncKnotUi(); else syncIsland(lastIslandState);
     clearTimeout(micIdleTimer); micIdleTimer = null;
+    // The talk key: a new ask is coming, and the screen it is about should be clean of the last one's marks.
+    if (pttHeld) clearMarks(true);
     if (pttHeld) { stopSpeaking(); startMic(); }
     else {
       if (knot3d && knot3d.setLevel) knot3d.setLevel(0);
@@ -2731,6 +2771,7 @@
 
   // Wind back: Esc, a click on the Knot, a bubble's own dismiss, or main.
   function dismissGuide(reason) {
+    clearMarks(false);
     stopSpeaking();
     hideBubble();
     pendingBubble = null;
@@ -2818,7 +2859,7 @@
   nus.on('guide:hint', showHint);
   // A sentence of the current step, spoken as soon as the model wrote it;
   // the first one of a step clears whatever the last step was still saying.
-  nus.on('guide:say', (p) => { if (p && p.text) say(p.text, { restart: !!p.first, ack: !!p.ack, cached: !!p.cached }); });
+  nus.on('guide:say', (p) => { if (p && p.text) say(p.text, { restart: !!p.first, ack: !!p.ack, cached: !!p.cached, sid: p.sid != null ? String(p.sessionId || '') + ':' + p.sid : null }); });
   nus.on('assignment:voice', p => {
     companionVoiceEnabled = !!(p && p.enabled);
     if (!companionVoiceEnabled) stopSpeaking();
@@ -3467,6 +3508,7 @@
   }
   nus.on('guide:done', onGuideDone);
   function onGuideDone(p) {
+    clearMarks(false);
     hideBubble();
     pendingBubble = null;
     retractOnly = false;

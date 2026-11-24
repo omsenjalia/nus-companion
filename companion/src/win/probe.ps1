@@ -283,9 +283,12 @@ function Score-Name($candidate, $want) {
 # The words on an image through the OCR engine built into Windows. Living in
 # this long-lived process saves the half second a fresh PowerShell costs
 # (assignment mode reads the screen on every settled change, 2026-09-21).
+# With "words":true also where each word is, for drawing on the screen
+# (src/guide/marks.js): adds width, height (the image's pixels) and words, one
+# word per row "x y w h word" in image pixels, a blank row between lines.
 $script:ocrEngine = $null
 $script:ocrAsTask = $null
-function Read-Words($path) {
+function Read-Words($path, [bool]$boxes = $false) {
   if (-not $script:ocrAsTask) {
     Add-Type -AssemblyName System.Runtime.WindowsRuntime
     $null = [Windows.Storage.StorageFile, Windows.Storage, ContentType = WindowsRuntime]
@@ -304,7 +307,18 @@ function Read-Words($path) {
     $decoder = & $await ([Windows.Graphics.Imaging.BitmapDecoder]::CreateAsync($stream)) ([Windows.Graphics.Imaging.BitmapDecoder])
     $bitmap  = & $await ($decoder.GetSoftwareBitmapAsync()) ([Windows.Graphics.Imaging.SoftwareBitmap])
     $result  = & $await ($script:ocrEngine.RecognizeAsync($bitmap)) ([Windows.Media.Ocr.OcrResult])
-    return @{ text=[string]$result.Text }
+    if (-not $boxes) { return @{ text=[string]$result.Text } }
+    $sb = New-Object System.Text.StringBuilder
+    $inv = [Globalization.CultureInfo]::InvariantCulture
+    foreach ($line in $result.Lines) {
+      foreach ($w in $line.Words) {
+        $r = $w.BoundingRect
+        $word = ([string]$w.Text) -replace '\s+', ' '
+        [void]$sb.Append(([double]$r.X).ToString('0.#', $inv)).Append(' ').Append(([double]$r.Y).ToString('0.#', $inv)).Append(' ').Append(([double]$r.Width).ToString('0.#', $inv)).Append(' ').Append(([double]$r.Height).ToString('0.#', $inv)).Append(' ').Append($word).Append([char]10)
+      }
+      [void]$sb.Append([char]10)
+    }
+    return @{ text=[string]$result.Text; width=[int]$bitmap.PixelWidth; height=[int]$bitmap.PixelHeight; words=$sb.ToString() }
   } finally { $stream.Dispose() }
 }
 
@@ -418,7 +432,7 @@ function Handle($req) {
   switch ($op) {
     'ping' { return @{ ok=$true; pid=$PID; ps=$PSVersionTable.PSVersion.ToString() } }
     'ocr' {
-      try { return Read-Words ([string]$req.path) }
+      try { return Read-Words ([string]$req.path) ([bool]$req.words) }
       catch { $e = $_.Exception; while ($e.InnerException) { $e = $e.InnerException }; return @{ error=('ocr: ' + $e.Message) } }
     }
     'fg' { $ig = if ($req.ignorePid) { [uint32]$req.ignorePid } else { 0 }; return Get-Foreground $ig }

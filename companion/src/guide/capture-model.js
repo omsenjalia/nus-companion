@@ -25,7 +25,12 @@ function applyMasks(image, masks, origin, physicalSize, nativeImage) {
 
 // -> { jpeg, width, height, pxWidth, pxHeight, display, blockMs } or null.
 // captureDisplay is src/screen.js (or a fake); electron supplies screen and nativeImage.
-async function captureForModel({ displayId, masks, maxSide, quality, captureDisplay, electron, now = () => performance.now() }) {
+// enlarge (for reading words, never for the model): a screen smaller than
+// maxSide is drawn up to this many times its size, because Windows OCR reads
+// small interface text better with more pixels under each letter (measured
+// 2026-11-23 on a 1920x1080 screen: 466 words at its own size, 491 at 1.5x,
+// for about 50 ms more).
+async function captureForModel({ displayId, masks, maxSide, quality, enlarge, captureDisplay, electron, now = () => performance.now() }) {
   const { screen, nativeImage } = electron;
   const side = Number(maxSide) || DEFAULT_MAX_SIDE;
   const q = Number(quality) || DEFAULT_QUALITY;
@@ -47,6 +52,9 @@ async function captureForModel({ displayId, masks, maxSide, quality, captureDisp
   if (longest > side) {
     const f = side / longest;
     image = image.resize({ width: Math.round(size.width * f), height: Math.round(size.height * f), quality: 'good' });
+  } else if (Number(enlarge) > 1 && longest > 0) {
+    const f = Math.min(Number(enlarge), side / longest);
+    if (f > 1.05) image = image.resize({ width: Math.round(size.width * f), height: Math.round(size.height * f), quality: 'best' });
   }
   const out = image.getSize();
   const jpeg = image.toJPEG(q);

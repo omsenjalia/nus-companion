@@ -7,6 +7,13 @@
 //   [POINT:0.12,0.05,0.08,0.03:Insert]  a box in screen fractions plus the text on it
 //   [POINT:none]                        nothing on this screen should be clicked
 //   [CONF:0.8]  [DONE]  [NOTE:one short sentence]  [NEXT:step | step]
+// An answer about the screen may also carry mark tags (src/guide/marks.js),
+// read only when the stream is made with { marks: true }:
+//   [UNDERLINE:"words"]  [CIRCLE:12]  [BOX:x,y,w,h:label]  [ARROW:a -> b]
+//   [WRONG:"149" = 184]  [RIGHT:"x = 4"]   the red pen, for a check of someone's work
+// A mark belongs to the sentence it follows (or sits in): it comes out as its
+// own event, after that sentence, carrying the sentence's number, and never
+// splits the sentence it sits in.
 //
 // Sentences are released as soon as they are complete, so speech and the
 // bubble can start while the model is still writing the tags. Tags never
@@ -16,10 +23,13 @@
 // Pure JS: feed(text) returns the events the new text completed, end()
 // returns the rest, reply() the normalized object the validator expects.
 
+const { parseMarkTag } = require('./marks');
+
 const SENTENCE_END = /[.!?…]+["'”’)\]]*\s+/;
 const MIN_CHUNK = 24;                 // sentences shorter than this merge with the next
 const MAX_TAG = 220;
 const TAG_RE = /^\[\s*(POINT|CONF|DONE|NOTE|NEXT|ANSWER)\s*(?::([^\]]*))?\]/i;
+const MARK_RE = /^\[\s*(UNDERLINE|CIRCLE|BOX|ARROW|WRONG|RIGHT)\s*:([^\]]*)\]/i;
 const THINK_OPEN = /<\s*thinking\s*>/i, THINK_CLOSE = /<\s*\/\s*thinking\s*>/i;
 // Tool-call markup written out as text: nothing after it is spoken.
 const LEAK_RE = /<\s*(?:[\w-]+:)?(?:function_calls\s*>|invoke\s+name\s*=|parameter\s+name\s*=|tool_(?:use|call|code)\b)/i;
@@ -54,8 +64,10 @@ function parseTag(kind, body) {
 }
 
 class ReplyStream {
-  constructor({ minChunk = MIN_CHUNK } = {}) {
+  constructor({ minChunk = MIN_CHUNK, marks = false } = {}) {
     this.minChunk = minChunk;
+    this.marks = !!marks;     // read mark tags; without it they are ordinary bracketed text
+    this.heldMarks = [];      // marks met inside a sentence that has not gone out yet
     this.buf = '';
     this.pending = '';        // a short sentence waiting for the next one
     this.events = [];
@@ -77,6 +89,8 @@ class ReplyStream {
     if (this.ended) return [];
     const out = this.drain(true);
     out.push(...this.flushPending());
+    // Marks whose sentence never went out (muted, or nothing was said): they still count.
+    out.push(...this.releaseMarks());
     this.ended = true;
     return out;
   }
@@ -131,6 +145,20 @@ class ReplyStream {
         if (ev) { this.events.push(ev); out.push(ev); }
         continue;
       }
+      const mk = this.marks ? MARK_RE.exec(this.buf) : null;
+      if (mk) {
+        this.buf = this.buf.slice(mk[0].length);
+        const ev = parseMarkTag(mk[1], mk[2]);
+        // A mark that cannot be read is dropped, never spoken.
+        if (ev) {
+          this.events.push(ev);
+          // Whole sentences in front of it go out first; a fragment keeps the mark with it.
+          out.push(...this.releaseSentences());
+          if (this.pending.trim()) this.heldMarks.push(ev);
+          else { ev.sentence = Math.max(0, this.spoken.length - 1); out.push(ev); }
+        }
+        continue;
+      }
       // Something in brackets that is not one of ours ("[1]", "[Ctrl+S]"): it is text.
       this.pending += this.buf.slice(0, close + 1);
       this.buf = this.buf.slice(close + 1);
@@ -166,7 +194,19 @@ class ReplyStream {
     const t = String(text).replace(/\s+/g, ' ').trim();
     if (!t || this.muted) return [];
     this.spoken.push(t);
-    return [{ type: 'speech', text: t }];
+    // Without marks a speech event is exactly what it has always been.
+    if (!this.marks) return [{ type: 'speech', text: t }];
+    return [{ type: 'speech', text: t, sentence: this.spoken.length - 1 }, ...this.releaseMarks()];
+  }
+
+  // The marks that were waiting for their sentence, numbered with it.
+  releaseMarks() {
+    if (!this.heldMarks.length) return [];
+    const out = this.heldMarks;
+    this.heldMarks = [];
+    const n = Math.max(0, this.spoken.length - 1);
+    for (const ev of out) ev.sentence = n;
+    return out;
   }
 
   flushPending() {
@@ -199,8 +239,8 @@ class ReplyStream {
 }
 
 // One-shot: a complete reply string -> events and the normalized object.
-function parseReply(raw) {
-  const rs = new ReplyStream();
+function parseReply(raw, opts) {
+  const rs = new ReplyStream(opts);
   rs.feed(String(raw == null ? '' : raw));
   rs.end();
   return { events: rs.events.slice(), spoken: rs.spoken.slice(), reply: rs.reply(), muted: rs.muted };

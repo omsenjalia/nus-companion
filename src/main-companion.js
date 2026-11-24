@@ -104,8 +104,11 @@ const stats = createStats({ userData, settings: { get: () => store.getSettings()
 crashHandlers.setOnCrash(() => stats.crash());
 // The sign-in gate's counts (contract amendment f): which of publik's screens is up, the button
 // pressed, and the moment the gate lets the person through. A test run counts nothing.
-const gateCount = SMOKE ? { screen() {}, press() {}, passed() {} }
-  : { screen: id => { stats.gateScreen(id); }, press: action => { stats.gatePress(action); }, passed: choice => { stats.gatePassed(choice); } };
+const gateCount = SMOKE ? { screen() {}, press() {}, passed() {}, plan() {}, noKey() {} }
+  : { screen: id => { stats.gateScreen(id); }, press: action => { stats.gatePress(action); }, passed: choice => { stats.gatePassed(choice); },
+    // 0.1.40: which choose screen the account got (free use, a plan, none left), and the no-key check.
+    plan: kind => { stats.onboardingStep(kind === 'plan' ? 'door_plan' : kind === 'balance' ? 'door_balance' : 'door_empty'); },
+    noKey: () => { stats.onboardingStep('door_nokey_seen'); } };
 function anyKeySaved() { try { return Object.values(store.getSettings().apiKeys || {}).some(Boolean); } catch { return false; } }
 // Feedback to Pranav (companion/src/feedback.js): "tell Pranav ...", a
 // one-tap reaction after the 1st, 5th and 25th ask, a day-3 check-in. Notes
@@ -307,6 +310,8 @@ function settingsPatch(patch) {
   if (!patch || typeof patch !== 'object' || Array.isArray(patch)) throw new Error('Invalid settings.');
   const clean = {};
   for (const key of ['openMic', 'persistTranscripts', 'saveAudio', 'speakReplies', 'smart', 'proactive', 'hideFromCapture', 'sounds', 'focusGuard', 'tasks', 'hands', 'knotIsland']) if (typeof patch[key] === 'boolean') clean[key] = patch[key];
+  // Draw on the screen (0.1.38): answers about the screen mark what they talk about.
+  if (typeof patch.drawOnScreen === 'boolean') clean.drawOnScreen = patch.drawOnScreen;
   if (typeof patch.channelMessages === 'boolean') clean.channelMessages = patch.channelMessages;
   if (typeof patch.startWithWindows === 'boolean') clean.startWithWindows = patch.startWithWindows;
   // Dictation (Ctrl + Win): set here, it wins over the install's half of the 0.1.37 test.
@@ -625,7 +630,9 @@ app.whenReady().then(async () => {
     // The gate window tells the stats which screen is up and which button was pressed (counts
     // only, nothing from publik). Closing it quits; will-quit then sends signin_closed.
     const ui = gateUi = require('../companion/src/publik/gate-window').createGateUI({ updating: fs.existsSync(path.join(userData, 'companion-settings.json')), icon: path.join(__dirname, '..', 'companion', 'tray-icon.png'),
-      onScreen: gateCount.screen, onPress: gateCount.press });
+      onScreen: gateCount.screen, onPress: gateCount.press, onPlan: gateCount.plan, onNoKey: gateCount.noKey,
+      // A key saved on this computer means "Use my own key" has something to answer with.
+      hasOwnAnswer: () => anyKeySaved() });
     // 0.1.31: a person who signed in on this computer before gets in when publik does not answer
     // (companion/src/publik/offline-pass.js). Anyone else meets publik's gate exactly as before.
     const gate = await require('../companion/src/publik/offline-pass').passGate({ ensureSignedIn: (gateUi) => publik.module.ensureSignedIn(gateUi), ui, signedInBefore: publik.signedInBefore,
