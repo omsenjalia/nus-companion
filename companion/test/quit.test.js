@@ -11,6 +11,7 @@ test('the held will-quit ends in app.exit, never a second app.quit', () => {
   const main = fs.readFileSync(path.join(__dirname, '..', '..', 'src', 'main-companion.js'), 'utf8');
   const hold = main.slice(main.indexOf("app.on('will-quit'"), main.indexOf("app.on('window-all-closed'"));
   assert.match(hold, /event\.preventDefault\(\);/);
-  assert.match(hold, /stats\.stop\(\)\.catch\(\(\) => \{\}\)\.finally\(\(\) => app\.exit\(0\)\)/);
+  // 0.1.38: the stop carries why the run ended (app_exit), none on a smoke test.
+  assert.match(hold, /stats\.stop\(SMOKE \? '' : exitReason \|\| 'other'\)\.catch\(\(\) => \{\}\)\.finally\(\(\) => app\.exit\(0\)\)/);
   assert.doesNotMatch(hold, /app\.quit\(\)/);
 });

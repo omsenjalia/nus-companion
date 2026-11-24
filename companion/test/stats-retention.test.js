@@ -25,7 +25,7 @@ const settle = () => new Promise(r => setImmediate(r));
 
 test('the amendment (e) lists, with what amendment (f) added, are the contract lists', () => {
   assert.deepEqual(HOOKS, ['checkin', 'morning_line', 'continue_project', 'reminder_toast', 'autostart_offer', 'my_nus', 'knot_report', 'notice',
-    'winback_d3', 'winback_d7', 'winback_d30', 'share_card', 'quiet_mode', 'contact_card', 'contact_declined']);
+    'winback_d3', 'winback_d7', 'winback_d30', 'share_card', 'quiet_mode', 'contact_card', 'contact_declined', 'dictation_news']);
   assert.deepEqual(AI_PATHS, ['key', 'claude_code', 'none', 'publik']);
   assert.deepEqual(STRUGGLES, ['homework_start', 'feeds', 'find_in_apps', 'writing', 'remember', 'other']);
   assert.deepEqual(VIAS, ['login', 'manual', 'relaunch']);

@@ -325,7 +325,7 @@ test('wiring: stats start before the door, the window reports screens, a test ru
   assert.match(main, /const gateCount = SMOKE \? \{ screen\(\) \{\}, press\(\) \{\}, passed\(\) \{\} \}/);
   assert.match(main, /publik\.setChoice\(String\(choice \|\| ''\)\); stats\.aiSource\(publik\.choice\(\)\)/);
   // The quit hold that carries signin_closed is the same one as before.
-  assert.match(main, /stats\.stop\(\)\.catch\(\(\) => \{\}\)\.finally\(\(\) => app\.exit\(0\)\)/);
+  assert.match(main, /stats\.stop\(SMOKE \? '' : exitReason \|\| 'other'\)\.catch\(\(\) => \{\}\)\.finally\(\(\) => app\.exit\(0\)\)/);
 
   const { statScreen } = require('../src/publik/gate-window');
   const mod = require('../src/publik/publik');

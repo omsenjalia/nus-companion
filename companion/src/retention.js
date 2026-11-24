@@ -255,7 +255,14 @@ function createRetention(o) {
   function checkinOffered(answer) { save({ checkin: { offered: true, at: now(), answer: answer || null } }); }
   function checkinAnswered(answer) { save({ checkin: { ...(st().checkin || {}), answer } }); }
 
-  return { noteEngaged, noteWin, noteBlocked, record, autostartDue, autostartOffered, autostartAnswer, canPop, popped, outcome, quiet, morningLine, morningShown,
+  // ---- dictation, told once to an install that took the update (0.1.38) ----
+  // The tour's dictation card is only seen by new installs. Known already when
+  // that card was shown or a dictation has landed; otherwise due once.
+  function dictationNewsDue() { return !st().dictationNews; }
+  function dictationNewsShown() { save({ dictationNews: 'shown' }); }
+  function dictationKnown() { if (!st().dictationNews) save({ dictationNews: 'known' }); }
+
+  return { dictationNewsDue, dictationNewsShown, dictationKnown, noteEngaged, noteWin, noteBlocked, record, autostartDue, autostartOffered, autostartAnswer, canPop, popped, outcome, quiet, morningLine, morningShown,
     checkinOffer, checkinOffered, checkinAnswered, milestone, milestoneShown, knotReport, knotReportShown, winback, winbackShown, pmfDue, pmfAsked,
     state: () => ({ ...st() }) };
 }

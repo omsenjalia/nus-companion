@@ -140,7 +140,8 @@ test('the menu opens where the brief says, and Esc and the mouse leaving close i
   assert.match(r, /orbEl\.addEventListener\('contextmenu'/, 'a right click on the Knot, wherever it lives');
   assert.match(r, /if \(p && p\.type === 'esc' && knotMenu && knotMenu\.open\) \{ knotMenu\.close\(\); return; \}/, 'Esc closes it before anything else');
   assert.match(main, /p\.action === 'menu-dashboard'\) \{ if \(hooks\.showDesktop\) hooks\.showDesktop\(\); return; \}/);
-  assert.match(main, /p\.action === 'menu-quit'\) \{ app\.quit\(\); return; \}/);
+  // 0.1.38: userQuit() tells the host the reason (quit) and then calls app.quit().
+  assert.match(main, /p\.action === 'menu-quit'\) \{ userQuit\(\); return; \}/);
   assert.equal(Menu.LEAVE_MS, 6000);
 });
 

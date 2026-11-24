@@ -783,6 +783,12 @@ function noteHook(kind, hook) {
   if (typeof fn !== 'function') return;
   try { fn(hook); } catch (_) { /* stats never break anything */ }
 }
+// The person chose Quit Nūs (the tray, the Knot's menu): the host is told why
+// this run is ending before the quit starts (stats.js EXIT_REASONS).
+function userQuit() {
+  try { if (typeof hooks.onExit === 'function') hooks.onExit('quit'); } catch (_) { /* stats never stop a quit */ }
+  app.quit();
+}
 function rtFree() {
   if (rtShowing || tour || selection || knotBusyWithSomething()) return false;
   return !!(win && !win.isDestroyed() && win.isVisible());
@@ -860,11 +866,25 @@ function rtProjects() {
   try { if (tasksOn()) return getTasks().projects.list().map((p) => ({ id: p.id, name: p.name, lastAt: p.updatedAt || 0 })); } catch (_) { /* none */ }
   return [];
 }
+// 0.1.38: dictation, told once to an install that took the update. Only where
+// dictation is on because of the install's half (never to the off half, and not
+// to someone who switched it on themselves), and not once the tour's card was
+// shown or a dictation has landed.
+const DICTATION_NEWS = 'New: I can type for you. Click into a text box, hold Ctrl and Win, say it, and let go.';
+function rtTryDictationNews() {
+  if (!dictationOn() || dictWhy() !== 'arm-on') return false;
+  const R = getRetention();
+  if (!R.dictationNewsDue()) return false;
+  const shown = rtShow('dictation_news', 'new', DICTATION_NEWS, [{ id: 'rt-ok', label: 'Got it', primary: true }]);
+  if (shown) R.dictationNewsShown();
+  return shown;
+}
 function rtTryQuietMoment() {
   if (store.getSettings().proactive === false || !rtPersonHere()) return false;
   const R = getRetention();
   const report = R.knotReport();
   if (report && rtShow('knot_report', 'your week', report.text, report.actions)) { R.knotReportShown(report.week); return true; }
+  if (rtTryDictationNews()) return true;
   const wb = R.winback({ projects: rtProjects() });
   if (wb && rtShow(wb.hook, wb.step === 'd30' ? 'from the Knot' : 'still here', wb.text, wb.actions, wb.projectId ? { projectId: wb.projectId } : null)) { R.winbackShown(wb.step); return true; }
   if (rtTryMorning()) return true;
@@ -1583,7 +1603,7 @@ function updateTrayMenu() {
     { label: 'My Nūs' + trayStreakWords(' (', ')'), click: () => { noteHook('used', 'my_nus'); if (typeof hooks.showMyNus === 'function') hooks.showMyNus(); } },
     ...(hooks.feedback ? [{ label: 'Send feedback to Pranav...', click: () => (hooks.showFeedback ? hooks.showFeedback() : openTell()) }] : []),
     { type: 'separator' },
-    { label: 'Quit Nūs', click: () => app.quit() },
+    { label: 'Quit Nūs', click: () => userQuit() },
   ]));
   tray.setToolTip(`Nūs Companion, ${visible ? 'on screen' : 'hidden'}${trayStreakWords(', ', '')}, ${captureHidden() ? 'hidden from' : 'visible in'} screen shares (${HOTKEY_MOD}+Shift+Space)`);
 }
@@ -1876,7 +1896,7 @@ function registerIpc() {
     if (p && p.action === 'knot-word') { noteKnotWord(p); return; }
     // The options menu's two rows that are not settings.
     if (p && p.action === 'menu-dashboard') { if (hooks.showDesktop) hooks.showDesktop(); return; }
-    if (p && p.action === 'menu-quit') { app.quit(); return; }
+    if (p && p.action === 'menu-quit') { userQuit(); return; }
     if (p && p.action === 'open' && activeNudge) { if (hooks.showDesktop) hooks.showDesktop(); endNudge('open'); return; }
     if (p && p.action === 'notnow' && activeNudge) { endNudge('notnow'); return; }
     if (p && p.action === 'walk' && selection) { walkFromSelection(); return; }
@@ -4109,6 +4129,7 @@ async function dictStop(reason) {
     routeLog('dictate: ' + outcome + ', ' + Math.round(pcm.length / 32) + 'ms audio, ' + heard.engine + ' ' + heard.decodeMs + 'ms' + (heard.loadMs ? ' (load ' + heard.loadMs + 'ms)' : '') + ', key up to words ' + (Date.now() - keyUpAt) + 'ms' + (paste ? ', ' + (paste.how || paste.error || paste.refused || '?') : '') + (target ? ' in ' + (target.process || '?') : ', no window') + (dict.gateNote ? ', focus ' + dict.gateNote : ''));
     noteDictation(outcome);
     if (outcome === 'ok') {
+      try { getRetention().dictationKnown(); } catch (_) { /* the news line may show once more, no harm */ }
       dict.prev = { hwnd: target && target.hwnd, at: Date.now() };
       send('guide:hint', { text: 'Typed.', ms: 1200, live: true });
     } else if (!text) flash('I did not catch any words. Hold Ctrl and Win, and try again.', 3500);
@@ -4317,6 +4338,7 @@ function tourCardOut(extra) {
 // The dictation card: the practice line goes into the person's own app.
 function tourDictateCard() {
   tour.dictateShown = true;
+  try { getRetention().dictationKnown(); } catch (_) { /* the news line may show once more, no harm */ }
   tour.dictating = true;
   tour.hear = null;
   const card = Tour.dictateCard({ caps: tour.caps });

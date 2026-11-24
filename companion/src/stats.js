@@ -23,7 +23,9 @@ const EVENTS = new Set(['install', 'app_open', 'source_answer', 'first_ask', 'as
   'update_offered', 'notice_shown', 'notice_clicked',
   'first_win', 'engaged', 'ai_ready', 'hook_shown', 'hook_used',
   // Amendment (f), 2026-11-11: the sign-in door (Sign in with publik).
-  'signin_shown', 'signin_clicked', 'signin', 'signin_closed', 'signin_unreachable', 'ai_source']);
+  'signin_shown', 'signin_clicked', 'signin', 'signin_closed', 'signin_unreachable', 'ai_source',
+  // 0.1.38 (eighth edition on the server): how a run ended, see EXIT_REASONS.
+  'app_exit']);
 const PROP_KEYS = new Set(['acq_action_id', 'utm_source', 'utm_medium', 'utm_campaign', 'source', 'mode', 'provider', 'minutes', 'method', 'unit', 'reason', 'os_version', 'locale', 'dev',
   'feature', 'seconds', 'outcome', 'step', 'from', 'surface', 'notice', 'via',
   'hook', 'path', 'struggle', 'nudge_group', 'cohort', 'screen']);
@@ -55,7 +57,17 @@ const HOOKS = ['checkin', 'morning_line', 'continue_project', 'reminder_toast', 
   'winback_d3', 'winback_d7', 'winback_d30', 'share_card', 'quiet_mode',
   // Amendment (f): the one ask for an email after a first win. Shown, saved
   // (hook_used contact_card) or turned down (hook_used contact_declined).
-  'contact_card', 'contact_declined'];
+  'contact_card', 'contact_declined',
+  // 0.1.38: one line telling an install that took the update that dictation exists
+  // (the tour's dictation card is only seen by new installs).
+  'dictation_news'];
+// 0.1.38: how a run of Nūs ended. Half of the people who chose start with Windows
+// are not seen the next day (read of 2026-11-23) and nothing said why. One row
+// {reason} as the app goes: quit (the person chose Quit Nūs), shutdown (Windows
+// is signing out or shutting down), update (closing to install one), uninstall
+// (sent by the uninstaller's one run of the app), exam (a proctored exam is
+// open), other. A crash or a killed process sends none; sleep is not an exit.
+const EXIT_REASONS = ['quit', 'shutdown', 'update', 'uninstall', 'exam', 'other'];
 // path: how answers are possible on this install, sent once after the key card.
 // publik (amendment f): publik's AI answers and no key is on this computer.
 const AI_PATHS = ['key', 'claude_code', 'none', 'publik'];
@@ -563,7 +575,15 @@ function createStats(o) {
   // Quit: stop the clocks, close the open feature timers, send the session's
   // minutes and, on a first run that never asked, first_run_end. Resolves
   // within about a second whatever the network does, so the host can wait.
-  function stop() {
+  // The exit row is written to disk before the send (durable), so a quit with no
+  // network is told at the next start. Once per run.
+  let exitNoted = false;
+  function exit(reason) {
+    if (exitNoted) return none();
+    exitNoted = true;
+    return durable('app_exit', { reason: EXIT_REASONS.includes(reason) ? reason : 'other' });
+  }
+  function stop(reason) {
     if (dayTimer) { timers.clearInterval(dayTimer); dayTimer = null; }
     if (minuteTimer) { timers.clearInterval(minuteTimer); minuteTimer = null; }
     if (retryTimer) { timers.clearTimeout(retryTimer); retryTimer = null; }
@@ -572,15 +592,16 @@ function createStats(o) {
     // Quit with the sign-in door still shut: that is signin_closed, written to
     // disk before the send so a slow network cannot lose it. first_run_end
     // keeps its meaning (a first run that got in and never asked), so it waits.
+    if (reason) sends.push(exit(reason));
     sends.push(flushSession(), st().gate ? gateClosed() : firstRunEnd());
     return Promise.race([Promise.all(sends).then(rs => rs[rs.length - 2]), settle]);
   }
 
   return { track, boot, tick, minute, flushSession, activeMinutes: () => activeMinutes, ask, dictation, featureSession, onboardingStep, firstRunEnd, crash,
-    keyConnected, sourceAnswer, setEnabled, status, stop, installId: id, enabled, dev: () => dev, updateOffered, noticeShown, noticeClicked, noteOneClick,
+    keyConnected, sourceAnswer, setEnabled, status, stop, exit, installId: id, enabled, dev: () => dev, updateOffered, noticeShown, noticeClicked, noteOneClick,
     win, engaged, aiReady, hookShown, hookUsed, nudgeGroup,
     gateScreen, gatePress, gatePassed, gateClosed, aiSource, cohort, flush, queued: () => queued().slice() };
 }
 
-module.exports = { createStats, TRACK_URL, EVENTS, PROP_KEYS, SOURCES, MODES, FEATURES, OUTCOMES, STEPS, SURFACES, NOTICE_ID, NOTICE, IDLE_LIMIT_S, DEV_FILE, utcDay,
+module.exports = { createStats, TRACK_URL, EVENTS, PROP_KEYS, SOURCES, MODES, FEATURES, OUTCOMES, STEPS, EXIT_REASONS, SURFACES, NOTICE_ID, NOTICE, IDLE_LIMIT_S, DEV_FILE, utcDay,
   HOOKS, AI_PATHS, STRUGGLES, VIAS, NUDGE_HOLDOUT, COHORTS, GATE_SCREENS, AI_SOURCES, QUEUE_MAX, QUEUE_MAX_AGE_MS, QUEUE_MAX_TRIES };

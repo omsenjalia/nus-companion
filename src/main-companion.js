@@ -78,6 +78,10 @@ const SMOKE = process.argv.includes('--smoke');
 // installer they point at is a Windows one), and so is the exam guard (it looks for the Windows
 // LockDown Browser). Off on a Mac with no timer and no request.
 const WINDOWS = process.platform === 'win32';
+// 0.1.38: the uninstaller starts Nūs once with this (companion/installer/uninstall.nsh),
+// never on an update. That run sends one app_exit {reason: uninstall} row if stats
+// are on and ends: no window, no sign-in, nothing else.
+const UNINSTALLED = process.argv.includes('--uninstalled');
 const ALLOWED_EXTERNAL = new Set(['https://typesafe.ai', 'https://aistudio.google.com/apikey', 'https://console.anthropic.com', 'https://github.com/potlakai/nus-desktop/releases']);
 function send(channel, value) { if (home && !home.isDestroyed()) home.webContents.send(channel, value); }
 // Packaged: the version electron-builder stamped. A dev run reports Electron's
@@ -195,7 +199,7 @@ function getChannel() {
 function getOneClick() {
   if (!oneClick) oneClick = createOneClick({ channel: getChannel(), dir: path.join(userData, 'updates'),
     canRun: app.isPackaged && process.platform === 'win32' && !process.env.PORTABLE_EXECUTABLE_DIR,
-    fetchImpl: (url, opts) => net.fetch(url, opts), spawnImpl: spawn, quit: () => app.quit(),
+    fetchImpl: (url, opts) => net.fetch(url, opts), spawnImpl: spawn, quit: () => { noteExit('update'); app.quit(); },
     beforeInstall: version => stats.noteOneClick(version), log: m => console.log('[update] ' + m),
     onState: s => { if (companion && companion.channelProgress) companion.channelProgress(s); if (home && !home.isDestroyed()) send('home:update', updateState()); } });
   return oneClick;
@@ -558,6 +562,7 @@ const guardQuit = createQuitGuard({ flush: () => databaseReady ? api.flushPersis
 // a lockdown browser can cover it; the quit happens either way.
 function standDown(name) {
   console.log('[nus-companion] ' + name + ' is open, standing down');
+  noteExit('exam');
   try { companion?.hide(); companion?.unregisterShortcuts(); } catch {}
   dialog.showMessageBox({ type: 'info', buttons: ['OK'], ...EXAM_MESSAGE }).then(() => app.quit(), () => app.quit());
   setTimeout(() => app.quit(), 8000);
@@ -569,17 +574,33 @@ app.on('before-quit', event => { if (companion?.isCapturing()) companion.setCapt
 // once, for that long at most, then the process exits. A second app.quit()
 // after a prevented will-quit is ignored by Electron and left the process
 // running; before-quit and will-quit have both run by then, so exit is safe.
+// 0.1.38: why this run is ending, for the app_exit row (stats.js EXIT_REASONS).
+// The first reason given stands: Quit Nūs, an update, an exam. Windows signing
+// out or shutting down is sent the moment it is known (session-end), because
+// the process may not live to reach will-quit.
+let exitReason = '';
+function noteExit(reason) { if (!exitReason) exitReason = String(reason || ''); }
+app.on('browser-window-created', (_event, w) => {
+  try { w.on('session-end', () => { noteExit('shutdown'); stats.exit('shutdown').catch(() => {}); }); } catch { /* Windows only */ }
+});
 let quitFlushed = false;
 app.on('will-quit', event => {
   companion?.unregisterShortcuts();
   if (quitFlushed) return;
   quitFlushed = true;
   event.preventDefault();
-  stats.stop().catch(() => {}).finally(() => app.exit(0));
+  stats.stop(SMOKE ? '' : exitReason || 'other').catch(() => {}).finally(() => app.exit(0));
 });
 app.on('window-all-closed', () => {});
 app.on('activate', () => { if (databaseReady) openHome(); });
 app.whenReady().then(async () => {
+  if (UNINSTALLED) {
+    // At most 4 s, whatever the network does; the uninstaller waits 8 s at most.
+    const done = () => app.exit(0);
+    setTimeout(done, 4000);
+    stats.exit('uninstall').catch(() => {}).finally(done);
+    return;
+  }
   const exam = await examGuard.check();
   if (exam) { standDown(exam); return; }
   // Publik's gate: before any screen the Companion owns (the Knot, the dashboard, the tour).
@@ -660,6 +681,7 @@ app.whenReady().then(async () => {
       paywallMet = true;
       return answerWithOwnKey() ? 'switched' : 'needs_key';
     },
+    onExit: reason => noteExit(reason),
     onHookShown: h => stats.hookShown(h),
     onHookUsed: h => stats.hookUsed(h),
     nudgeGroup: () => stats.nudgeGroup(),

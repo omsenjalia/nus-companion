@@ -15,7 +15,7 @@ module.exports = {
   appId: 'com.nus.companion',
   productName: 'Nus Companion',
   copyright: base.copyright,
-  extraMetadata: { name: 'nus-companion', version: '0.1.37', main: 'src/main-companion.js', publik: PUBLIK,
+  extraMetadata: { name: 'nus-companion', version: '0.1.38', main: 'src/main-companion.js', publik: PUBLIK,
     description: 'Nūs Companion: the Knot that hears you and acts, on its own.' },
   directories: { output: 'dist-companion', buildResources: 'build' },
   // companion/** carries companion/src/stats.js (anonymous usage stats, plain
@@ -25,7 +25,7 @@ module.exports = {
     'src/crash.js', 'src/quit-guard.js', 'src/autostart.js', 'src/db.js', 'src/license.js', 'package.json',
     '!**/*.test.js', '!**/*.bak-*', '!companion/test/**', '!docs/**', '!scripts/**', '!supabase/**',
     // Developer-only checks and the unused 3D Knot stay out of the asar.
-    '!companion/verify-focus-guard.cjs', '!companion/renderer/knot3d.js',
+    '!companion/verify-focus-guard.cjs', '!companion/renderer/knot3d.js', '!companion/installer/**',
     '!renderer/**', '!src/config.js', '!electron-builder*.config.js',
     // publik: the module finds publik-app-token.txt in its folder or a parent (the asar root).
     ...(PUBLIK ? ['publik-app-token.txt'] : ['!companion/src/publik/**']),
@@ -89,6 +89,8 @@ module.exports = {
       { from: 'vendor/embed-models', to: 'embed-models', filter: ['all-MiniLM-L6-v2/model_quantized.onnx', 'all-MiniLM-L6-v2/vocab.txt'] }],
   },
   portable: { artifactName: 'Nus-Companion-Portable.${ext}' },
-  nsis: { ...base.nsis, shortcutName: 'Nus Companion', uninstallDisplayName: 'Nūs Companion' },
+  // 0.1.38: on uninstall (never on an update), one anonymous app_exit {reason: uninstall}
+  // row and the site's one question. companion/installer/uninstall.nsh.
+  nsis: { ...base.nsis, shortcutName: 'Nus Companion', uninstallDisplayName: 'Nūs Companion', include: 'companion/installer/uninstall.nsh' },
   publish: [{ provider: 'github', owner: 'potlakai', repo: 'nus-companion' }],
 };
